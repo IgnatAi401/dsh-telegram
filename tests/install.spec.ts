@@ -90,6 +90,6 @@ describe('install.sh', () => {
     const { env, recorded } = fixture()
     const result = spawnSync('bash', ['-s', '--', 'install'], { env, input: readFileSync(installer), encoding: 'utf8', cwd: tmpdir() })
     expect(result.status).toBe(0)
-    expect(recorded()).toEqual([['plugin', '--profile', 'web', 'add', 'github:IgnatAy/dsh-telegram']])
+    expect(recorded()).toEqual([['plugin', '--profile', 'web', 'add', 'github:IgnatAi401/dsh-telegram']])
   })
 })

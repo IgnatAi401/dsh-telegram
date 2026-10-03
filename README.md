@@ -13,7 +13,7 @@ Requires Bash and Node.js 22.19+ (22.x) or 24+ with npm/npx; online installation
 Install online:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IgnatAy/dsh-telegram/main/install.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- install
 ```
 
 Or run from this repository:
@@ -53,7 +53,7 @@ Stop DSH and run the online installation command again. For a local checkout, ge
 Stop DSH, then run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IgnatAy/dsh-telegram/main/install.sh | bash -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- uninstall
 ```
 
 Or run from this repository:

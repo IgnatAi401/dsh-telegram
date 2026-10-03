@@ -13,7 +13,7 @@ DeepSeek Harness 的 Telegram 机器人插件，主要用于 Linux / WSL2。在 
 在线安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IgnatAy/dsh-telegram/main/install.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- install
 ```
 
 也可以在本仓库目录运行：
@@ -53,7 +53,7 @@ npx @deepseek-ai/dsh web
 停止 DSH 后运行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IgnatAy/dsh-telegram/main/install.sh | bash -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- uninstall
 ```
 
 也可以在本仓库目录运行：
