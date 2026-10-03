@@ -17,12 +17,9 @@ describe('dsh-telegram plugin export shape', () => {
     expect(unwrapped.name).toBe('telegram')
     expect(unwrapped.inject).toEqual([
       'agents',
-      'agentPresets',
       'attachments',
       'llm',
       'sessionController',
-      'sessionPersistence',
-      'sessionQuery',
       'systemPrompt',
       'workspaceRegistry',
     ])

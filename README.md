@@ -4,11 +4,11 @@
 
 A Telegram bot plugin for DeepSeek Harness, primarily for Linux / WSL2. Chat with agents and send images and files in private Telegram chats, sharing workspaces and sessions with the Web UI.
 
-Developed against **DeepSeek Harness v0.1.5-rc.2**.
+Developed against **DeepSeek Harness v0.2.0-rc.2**. Installation goes through DSH's own `dsh plugin` command, which checks version compatibility at startup.
 
 ## Install
 
-Requires Bash and Node.js 22.19+ (22.x) or 24+ with npm/npx. Online installation also requires curl and tar. No global DSH installation or DSH source checkout is needed.
+Requires Bash and Node.js 22.19+ (22.x) or 24+ with npm/npx; online installation also requires curl. pnpm is used when present, otherwise fetched through npx. No global DSH installation or DSH source checkout is needed. Upgrading from 0.2.x removes the old copied installation automatically.
 
 Install online:
 
@@ -36,7 +36,7 @@ Separate multiple user IDs with commas. Only private chats and allowed users are
 
 Configure model credentials and create a workspace in the Web UI, then open a private chat with the bot:
 
-- `/menu`: select a workspace, manage sessions, and switch models.
+- `/menu`: select a workspace, create, open or archive sessions, and switch models and reasoning effort.
 - `/help`: list available commands.
 - Send text, images, or files to start chatting.
 
@@ -46,7 +46,7 @@ Defaults are the `web` profile and the `~/.dsh` data directory. If you customize
 
 ## Update
 
-Stop DSH and run the online installation command again. For a local checkout, get the latest code and run `bash install.sh`. Restart DSH afterward.
+Stop DSH and run the online installation command again. For a local checkout, get the latest code, run `pnpm install --frozen-lockfile && pnpm build`, then `bash install.sh`. Restart DSH afterward.
 
 ## Uninstall
 

@@ -4,11 +4,11 @@
 
 DeepSeek Harness 的 Telegram 机器人插件，主要用于 Linux / WSL2。在 Telegram 私聊中与 Agent 对话、发送图片和文件，并与 Web UI 共享工作区和会话。
 
-基于 **DeepSeek Harness v0.1.5-rc.2** 开发。
+基于 **DeepSeek Harness v0.2.0-rc.2** 开发。安装通过 DSH 自带的 `dsh plugin` 命令完成，启动时由 DSH 检查版本兼容性。
 
 ## 安装
 
-需要 Bash、Node.js 22.19+（22.x）或 24+（含 npm/npx）；在线安装还需要 curl 和 tar。无需全局安装 DSH 或下载其源码。
+需要 Bash、Node.js 22.19+（22.x）或 24+（含 npm/npx）；在线安装还需要 curl。已安装 pnpm 时直接使用，否则通过 npx 临时获取。无需全局安装 DSH 或下载其源码。从 0.2.x 升级时会自动清理旧的复制式安装。
 
 在线安装：
 
@@ -36,7 +36,7 @@ npx @deepseek-ai/dsh web
 
 在 Web UI 配置模型凭据并创建工作区后，私聊机器人：
 
-- `/menu`：选择工作区、管理会话和切换模型。
+- `/menu`：选择工作区，新建、打开或归档会话，切换模型和推理强度。
 - `/help`：查看可用命令。
 - 直接发送文字、图片或文件开始对话。
 
@@ -46,7 +46,7 @@ npx @deepseek-ai/dsh web
 
 ## 更新
 
-停止 DSH，重新执行在线安装命令；使用本地仓库时，先获取最新代码，再运行 `bash install.sh`。完成后重新启动 DSH。
+停止 DSH，重新执行在线安装命令；使用本地仓库时，先获取最新代码，运行 `pnpm install --frozen-lockfile && pnpm build`，再运行 `bash install.sh`。完成后重新启动 DSH。
 
 ## 卸载
 

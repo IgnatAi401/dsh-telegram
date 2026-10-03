@@ -25,7 +25,6 @@ export declare class TelegramProgress {
     private phase;
     private readonly activeTools;
     private readonly transcript;
-    private lastPublished;
     private paused;
     private waitingForUser;
     private disposed;
@@ -48,11 +47,12 @@ export declare class TelegramProgress {
     stopByUser(): void;
     /** A terminal message clears a tool-only/failed draft even without an assistant answer. */
     terminalNotice(reason: string): string | undefined;
-    /** One rich message: folded intermediate messages followed by the answer. */
-    finalMessages(text: string): string[];
-    /** Include late tool results and reasoning-only turns in the terminal delivery. */
-    finishMessages(notice?: string): string[] | undefined;
-    private processDetails;
+    /**
+     * The complete turn as one rich message: folded intermediate messages, then
+     * the answer (or `notice` when the turn produced none). Includes late tool
+     * results and reasoning-only turns; `undefined` when nothing was recorded.
+     */
+    finalMessage(notice?: string): string | undefined;
     private status;
     private schedule;
     private send;

@@ -1,142 +1,95 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const installer = fileURLToPath(new URL('../scripts/install-copy.sh', import.meta.url))
+const root = fileURLToPath(new URL('..', import.meta.url))
+const installer = join(root, 'install.sh')
 const homes: string[] = []
 afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
+const LEGACY_BLOCK = [
+  '# telegram plugin begin (managed by scripts/install-copy.sh)',
+  '- insert:',
+  '    - id: telegram',
+  "      name: 'dsh-telegram'",
+  '# telegram plugin end (managed by scripts/install-copy.sh)',
+].join('\n')
+
+/** A fake `dsh` that records its argv and emulates `plugin add/remove` on the profile manifest. */
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), 'telegram-install-'))
   homes.push(home)
-  const env = { ...process.env, DSH_HOME: home }
+  const calls = join(home, 'calls.log')
+  const fake = join(home, 'fake-dsh')
+  writeFileSync(fake, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n')
+const manifest = ${JSON.stringify(join(home, 'profiles'))} + '/' + args[2] + '/package.json'
+const value = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : { dependencies: {} }
+if (args[3] === 'add') value.dependencies['dsh-telegram'] = args[4]
+if (args[3] === 'remove') delete value.dependencies[args[4]]
+fs.mkdirSync(require('node:path').dirname(manifest), { recursive: true })
+fs.writeFileSync(manifest, JSON.stringify(value))
+`)
+  chmodSync(fake, 0o755)
+  const env = { ...process.env, DSH_HOME: home, DSH_TELEGRAM_DSH: fake }
   const run = (...args: string[]) => execFileSync('bash', [installer, ...args], { env, encoding: 'utf8' })
-  return { home, env, run }
+  const recorded = (): string[][] => existsSync(calls)
+    ? readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]) : []
+  return { home, env, run, recorded }
 }
 
-describe('profile copy installer', () => {
-  it('upgrades a dedicated profile without duplicating rows or replacing user config', () => {
-    const { home, run } = fixture()
-    run('telegram')
-    const profile = join(home, 'profiles/telegram')
-    const patch = join(profile, 'cordis.patch.yml')
-    const custom = '\n- id: tools\n  config:\n    mode: native\n'
-    writeFileSync(patch, readFileSync(patch, 'utf8') + custom)
-    writeFileSync(join(profile, 'node_modules/dsh-telegram/lib/index.js'), 'old alpha build')
-    run('telegram')
-    const updated = readFileSync(patch, 'utf8')
-    expect(updated).toContain(custom.trim())
-    for (const id of ['workspace', 'session-controller', 'agent-presets', 'subagent-model-selection-settings', 'telegram']) {
-      expect(updated.match(new RegExp('    - id: ' + id + '\\n', 'g'))).toHaveLength(1)
-    }
-    expect(readFileSync(join(profile, 'node_modules/dsh-telegram/lib/index.js'), 'utf8')).not.toContain('old alpha build')
-    expect(JSON.parse(readFileSync(join(profile, 'node_modules/dsh-telegram/package.json'), 'utf8')).version).toBe('0.2.2')
-    // Match DSH's shared profile fallback and import the copied build, including
-    // its new persistence helper and rc2 title dependency.
-    symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(home, 'profiles/node_modules'), 'dir')
-    expect(execFileSync(process.execPath, ['--input-type=module', '-e',
-      'const plugin = await import(process.argv[1]); console.log(typeof plugin.apply)',
-      join(profile, 'node_modules/dsh-telegram/lib/index.js'),
-    ], { encoding: 'utf8' }).trim()).toBe('function')
+describe('install.sh', () => {
+  it('installs the checkout through dsh plugin add and removes it through dsh plugin remove', () => {
+    const { run, recorded } = fixture()
+    run()
+    expect(recorded()).toEqual([['plugin', '--profile', 'web', 'add', `file:${root.replace(/\/$/, '')}`]])
+    run('uninstall')
+    expect(recorded().at(-1)).toEqual(['plugin', '--profile', 'web', 'remove', 'dsh-telegram'])
+    run('uninstall')
+    expect(recorded()).toHaveLength(2)
   })
 
-  it('replaces managed installer rows and leaves unrelated web settings on uninstall', () => {
+  it('removes a 0.2.x copy installation while keeping unrelated profile settings', () => {
+    const { home, run } = fixture()
+    const profile = join(home, 'profiles/custom')
+    mkdirSync(join(profile, 'node_modules/dsh-telegram/lib'), { recursive: true })
+    writeFileSync(join(profile, 'package.json'), '{"private":true,"dependencies":{}}')
+    const custom = '- id: tools\n  config:\n    mode: native\n'
+    writeFileSync(join(profile, 'cordis.patch.yml'), `${custom}\n${LEGACY_BLOCK}\n`)
+    run('install', 'custom')
+    expect(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8').trim()).toBe(custom.trim())
+    expect(existsSync(join(profile, 'node_modules/dsh-telegram'))).toBe(false)
+  })
+
+  it('leaves a valid patch file when the legacy block was its only content', () => {
     const { home, run } = fixture()
     const profile = join(home, 'profiles/web')
     mkdirSync(profile, { recursive: true })
-    writeFileSync(join(profile, 'package.json'), '{"private":true}')
-    const patch = join(profile, 'cordis.patch.yml')
-    const custom = '- id: tools\n  config:\n    mode: native\n'
-    writeFileSync(patch, custom + '# telegram plugin begin (managed by scripts/install-copy.sh)\n- insert:\n    - id: telegram\n      name: dsh-telegram\n# telegram plugin end (managed by scripts/install-copy.sh)\n')
-    run('web')
-    run('web')
-    expect(readFileSync(patch, 'utf8').match(/    - id: telegram\n/g)).toHaveLength(1)
-    run('uninstall', 'web')
-    expect(readFileSync(patch, 'utf8').trim()).toBe(custom.trim())
+    writeFileSync(join(profile, 'cordis.patch.yml'), `${LEGACY_BLOCK}\n`)
+    run('uninstall')
+    expect(readFileSync(join(profile, 'cordis.patch.yml'), 'utf8').trim()).toBe('[]')
   })
 
-  it('rejects the reserved fallback directory for install and uninstall', () => {
-    const { home, env } = fixture()
-    const fallback = join(home, 'profiles/node_modules/node_modules/dsh-telegram')
-    mkdirSync(fallback, { recursive: true })
-    const marker = join(fallback, 'keep.txt')
-    writeFileSync(marker, 'keep')
-    for (const args of [['node_modules'], ['uninstall', 'node_modules']]) {
+  it('rejects invalid actions and profile names before running dsh', () => {
+    const { env, recorded } = fixture()
+    for (const args of [['upgrade'], ['install', '../web'], ['install', 'node_modules'], ['install', 'web', 'extra']]) {
       const result = spawnSync('bash', [installer, ...args], { env, encoding: 'utf8' })
-      expect(result.status).toBe(1)
-      expect(result.stderr).toContain('invalid profile name')
-      expect(readFileSync(marker, 'utf8')).toBe('keep')
+      expect(result.status).toBe(2)
     }
-  })
-})
-
-
-describe('one-command entry point', () => {
-  const entry = fileURLToPath(new URL('../install.sh', import.meta.url))
-
-  it('creates a stock web profile, upgrades idempotently, and preserves settings on uninstall without dsh', () => {
-    const { home, env } = fixture()
-    // A dsh executable that fails makes accidental global CLI use visible.
-    const bin = join(home, 'bin')
-    mkdirSync(bin)
-    writeFileSync(join(bin, 'dsh'), '#!/bin/sh\nexit 97\n')
-    chmodSync(join(bin, 'dsh'), 0o755)
-    const run = (...args: string[]) => execFileSync('bash', [entry, ...args], {
-      env: { ...env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', cwd: home,
-    })
-    run()
-    const profile = join(home, 'profiles/web')
-    const manifest = join(profile, 'package.json')
-    expect(JSON.parse(readFileSync(manifest, 'utf8')).dsh.profile).toEqual({
-      bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'], patchReload: 'live',
-    })
-    const originalManifest = readFileSync(manifest, 'utf8')
-    const patch = join(profile, 'cordis.patch.yml')
-    const custom = '\n- id: tools\n  config:\n    mode: native\n'
-    writeFileSync(patch, readFileSync(patch, 'utf8') + custom)
-    const history = join(home, 'history.jsonl')
-    writeFileSync(history, 'keep history')
-    run('install')
-    expect(readFileSync(patch, 'utf8').match(/    - id: telegram\n/g)).toHaveLength(1)
-    run('uninstall')
-    run('uninstall')
-    expect(existsSync(join(profile, 'node_modules/dsh-telegram'))).toBe(false)
-    expect(readFileSync(patch, 'utf8').trim()).toBe(custom.trim())
-    expect(readFileSync(manifest, 'utf8')).toBe(originalManifest)
-    expect(readFileSync(history, 'utf8')).toBe('keep history')
+    expect(recorded()).toEqual([])
   })
 
-  it('installs and uninstalls through stdin using a downloaded snapshot', () => {
-    const { home, env } = fixture()
-    const root = fileURLToPath(new URL('../', import.meta.url))
-    const archive = join(home, 'snapshot.tar.gz')
-    execFileSync('tar', ['-czf', archive, '-C', root, './install.sh', './scripts', './lib', './package.json', './cordis.patch.yml'])
-    const bin = join(home, 'bin')
-    mkdirSync(bin)
-    // Stand in for curl only; exercise real extraction and installer execution.
-    writeFileSync(join(bin, 'curl'), '#!/bin/sh\ncp "$TEST_ARCHIVE" "$4"\n')
-    chmodSync(join(bin, 'curl'), 0o755)
-    const source = readFileSync(entry, 'utf8')
-    const options = {
-      input: source, cwd: home, encoding: 'utf8' as const,
-      env: { ...env, PATH: `${bin}:${process.env.PATH}`, TEST_ARCHIVE: archive },
-    }
-    execFileSync('bash', ['-s', '--', 'install'], options)
-    const installed = join(home, 'profiles/web/node_modules/dsh-telegram/lib/index.js')
-    expect(existsSync(installed)).toBe(true)
-    execFileSync('bash', ['-s', '--', 'uninstall'], options)
-    expect(existsSync(installed)).toBe(false)
-  })
-
-  it('rejects unknown actions before writing profile files', () => {
-    const { home, env } = fixture()
-    const result = spawnSync('bash', [entry, 'remove'], { env, encoding: 'utf8' })
-    expect(result.status).toBe(2)
-    expect(existsSync(join(home, 'profiles'))).toBe(false)
+  it('installs the GitHub repository when piped through stdin', () => {
+    const { env, recorded } = fixture()
+    const result = spawnSync('bash', ['-s', '--', 'install'], { env, input: readFileSync(installer), encoding: 'utf8', cwd: tmpdir() })
+    expect(result.status).toBe(0)
+    expect(recorded()).toEqual([['plugin', '--profile', 'web', 'add', 'github:IgnatAy/dsh-telegram']])
   })
 })

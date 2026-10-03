@@ -1,117 +1,77 @@
 /**
- * Telegram bridge plugin: relays Telegram chats to harness agent sessions
- * through the Bot API's long polling. Copied from Hermes' telegram platform
- * adapter design — per-chat sessions, user allowlist, native rich formatting,
- * inline menus, and a typing indicator — trimmed to the harness's
- * text-first seams. The selected DSH profile supplies the LLM adapter,
- * agent spine, sessions, and tools.
+ * Telegram bridge plugin: relays Telegram private chats to DSH sessions
+ * through Bot API long polling. Sessions are created, resumed, and switched
+ * between models through the Session Controller, so they behave exactly like
+ * Web-created sessions and remain visible in the Web UI.
  *
  * @module telegram
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import type {} from '@deepseek-ai/dsh-agent-presets'
-import type {} from '@deepseek-ai/dsh-api-session-controller'
-import type {} from '@deepseek-ai/dsh-attachment'
-import type {} from '@deepseek-ai/dsh-session-persistence'
-import type {} from '@deepseek-ai/dsh-session-query'
-import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-workspace'
 import { TelegramBridge } from './bridge.js'
 import type { TelegramBridgeOptions } from './bridge.js'
 
 export * from './bridge.js'
 export * from './client.js'
-export * from './format.js'
 
 export const name = 'telegram'
-// Chat agents must join a preset before publication so their tools, prompt
-// sections, and skills are scoped exactly like Web-created agents.
-export const inject = [
-  'agents',
-  'agentPresets',
-  'attachments',
-  'llm',
-  'sessionController',
-  'sessionPersistence',
-  'sessionQuery',
-  'systemPrompt',
-  'workspaceRegistry',
-]
+export const inject = ['agents', 'attachments', 'llm', 'sessionController', 'systemPrompt', 'workspaceRegistry']
 
 /** Telegram bridge deployment config. */
-export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token'> {
-  /** Bot token; omitted values fall back to the `DSH_TELEGRAM_TOKEN` env var. */
+export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers'> {
+  /** Bot token; empty falls back to the `DSH_TELEGRAM_TOKEN` env var. */
   token?: string
+  /** Allowed Telegram user ids; empty falls back to `DSH_TELEGRAM_ALLOWED_USER_IDS`. */
+  allowedUserIds?: number[]
+  /** Allow any Telegram user (development only); unset falls back to `DSH_TELEGRAM_ALLOW_ALL_USERS`. */
+  allowAllUsers?: boolean
 }
 
 export const Config: Schema<TelegramConfig> = Schema.object({
-  // The schema default keeps the field present; an empty value falls back to
-  // the DSH_TELEGRAM_TOKEN environment variable in apply.
   token: Schema.string().default(''),
   allowedUserIds: Schema.array(Schema.natural().min(1)).default([]),
   allowAllUsers: Schema.boolean(),
-  provider: Schema.string().min(1).default('deepseek-official'),
-  model: Schema.string().min(1).default('deepseek-flash'),
-  maxMessageLength: Schema.natural().min(1).max(4096).default(4096),
+  preset: Schema.string().min(1),
   pollingTimeoutSec: Schema.natural().min(1).default(30),
+  apiBaseUrl: Schema.string().pattern(/^https?:\/\//),
   resultCacheDirectory: Schema.string().min(1),
-  preset: Schema.string().min(1).default('standard'),
-  reasoningEffort: Schema.union(['', 'off', 'low', 'high', 'max'] as const).default(''),
 })
 
-/** Env var carrying a comma-separated Telegram user id allowlist. */
 const ALLOWED_USER_IDS_ENV = 'DSH_TELEGRAM_ALLOWED_USER_IDS'
-/** Env var opting into open access (development only). */
 const ALLOW_ALL_USERS_ENV = 'DSH_TELEGRAM_ALLOW_ALL_USERS'
 
-/** Parse the comma-separated allowlist env var; `undefined` when unset. */
-function envAllowedUserIds(): number[] | undefined {
-  const raw = process.env[ALLOWED_USER_IDS_ENV]
-  if (raw === undefined || raw === '') return undefined
+/** Parse the comma-separated allowlist env var; empty when unset. */
+function envAllowedUserIds(): number[] {
+  const raw = process.env[ALLOWED_USER_IDS_ENV]?.trim()
+  if (raw === undefined || raw === '') return []
   const values = raw.split(',').map(value => value.trim())
-  const invalid = values.find(value => value === ''
-    || !Number.isSafeInteger(Number(value))
-    || Number(value) <= 0)
-  if (invalid !== undefined) {
+  if (values.some(value => !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) {
     throw new Error(`${ALLOWED_USER_IDS_ENV} must contain comma-separated positive integer user ids`)
   }
   return [...new Set(values.map(Number))]
 }
 
 /** Parse the optional open-access environment flag. */
-function envAllowAllUsers(): boolean | undefined {
+function envAllowAllUsers(): boolean {
   const raw = process.env[ALLOW_ALL_USERS_ENV]
-  if (raw === undefined || raw === '') return undefined
+  if (raw === undefined || raw === '' || raw === 'false') return false
   if (raw === 'true') return true
-  if (raw === 'false') return false
   throw new Error(`${ALLOW_ALL_USERS_ENV} must be "true" or "false"`)
 }
 
 /**
- * Start the Telegram bridge. Missing tokens fail loudly at load; polling and
- * session delivery run for as long as the plugin's fiber lives.
- * @param ctx - Cordis context; Agent, preset, LLM, persistence, query, and
- * Session Controller and workspace services are injected by the plugin declaration.
+ * Start the Telegram bridge. A missing token fails loudly at load; polling
+ * runs for as long as the plugin's fiber lives.
+ * @param ctx - Cordis context with the services named by {@link inject}.
  * @param config - deployment config.
  */
-export async function apply(ctx: Context, config: TelegramConfig): Promise<void> {
-  const configuredToken = config.token?.trim()
-  const token = configuredToken === undefined || configuredToken === ''
-    ? process.env.DSH_TELEGRAM_TOKEN?.trim()
-    : configuredToken
-  if (token === undefined || token === '') {
-    throw new Error('telegram: missing bot token (set config.token or DSH_TELEGRAM_TOKEN)')
-  }
-  // Config wins; the env vars are the profile-friendly fallback (same pattern
-  // as the token), so a profile can deploy the bot with environment only.
-  const allowedUserIds = (config.allowedUserIds?.length ?? 0) > 0
-    ? config.allowedUserIds
-    : envAllowedUserIds() ?? []
-  const allowAllUsers = config.allowAllUsers ?? envAllowAllUsers() ?? false
-  const preset = (await ctx.agentPresets.resolve(config.preset)).id
-  const bridge = new TelegramBridge(ctx, { ...config, token, allowedUserIds, allowAllUsers, preset })
+export function apply(ctx: Context, config: TelegramConfig): void {
+  const token = config.token?.trim() || process.env.DSH_TELEGRAM_TOKEN?.trim()
+  if (!token) throw new Error('telegram: missing bot token (set config.token or DSH_TELEGRAM_TOKEN)')
+  const allowedUserIds = config.allowedUserIds?.length ? config.allowedUserIds : envAllowedUserIds()
+  const allowAllUsers = config.allowAllUsers ?? envAllowAllUsers()
+  const bridge = new TelegramBridge(ctx, { ...config, token, allowedUserIds, allowAllUsers })
   ctx.effect(() => {
     bridge.start()
     return () => bridge.stop()

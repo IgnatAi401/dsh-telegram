@@ -65,16 +65,12 @@ it('retains successful output across restarts and repeated resends until replace
   expect(await readdir(store.directory)).toEqual(['7.json'])
 })
 
-it('retains both messages after a partial send and replays them in order after restart', async () => {
+it('keeps the output after a failed send and replays it after restart', async () => {
   const store = await cache()
-  const messages = ['<details><summary>过程</summary>记录</details>', '最终正文']
-  const send = vi.fn(async (text: string) => {
-    if (text === messages[1]) throw new Error('answer delivery failed')
-  })
-  await expect(store.deliver(7, messages, send)).rejects.toThrow('answer delivery failed')
-  expect(send.mock.calls.map(([text]) => text)).toEqual(messages)
+  const markdown = '<details><summary>过程</summary>记录</details>\n\n最终正文'
+  await expect(store.deliver(7, markdown, async () => { throw new Error('delivery failed') })).rejects.toThrow('delivery failed')
   const restored = new TelegramResultCache('123:rotated', join(store.directory, '..'))
   const resend = vi.fn(async () => {})
   expect(await restored.resend(7, resend)).toBe(true)
-  expect(resend.mock.calls).toEqual(messages.map(text => [text]))
+  expect(resend.mock.calls).toEqual([[markdown]])
 })

@@ -1,7 +1,7 @@
 /**
- * Minimal Telegram Bot API client over `fetch`: long-polling `getUpdates`,
- * `sendMessage` with HTML or plain parse modes, `sendChatAction`, and `getMe`.
- * The token is embedded in the request URL, so every error path redacts it.
+ * Minimal Telegram Bot API client over `fetch`: long polling, native Rich
+ * Markdown messages and drafts, inline keyboards, and file downloads. The
+ * token is embedded in the request URL, so every error path redacts it.
  * @module telegram/client
  */
 
@@ -114,24 +114,12 @@ export interface TelegramClientLike {
   sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>
   /** Replace rich content and its inline keyboard in a single request. */
   editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>
-  /** Fetch the bot identity; validates the token. */
-  getMe(signal?: AbortSignal): Promise<TelegramUser>
   /** Long-poll for updates at or after `offset`. */
   getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>
-  /** Send a message, optionally with HTML parse mode. */
-  sendMessage(
-    chatId: number,
-    text: string,
-    parseMode?: 'HTML',
-    signal?: AbortSignal,
-    replyMarkup?: TelegramReplyMarkup,
-  ): Promise<TelegramMessage>
   /** Send a chat action such as `typing`. */
   sendChatAction(chatId: number, action: string, signal?: AbortSignal): Promise<boolean>
   /** Register the bot's slash-command list (shown in the Telegram UI). */
   setMyCommands(commands: Array<{ command: string; description: string }>, signal?: AbortSignal): Promise<boolean>
-  /** Edit a previously sent message, optionally with HTML parse mode. */
-  editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal): Promise<TelegramMessage>
   /** Replace or remove the inline keyboard below a message. */
   editMessageReplyMarkup(
     chatId: number,
@@ -305,14 +293,6 @@ export class TelegramClient implements TelegramClientLike {
   }
 
   /**
-   * Fetch the bot identity; fails when the token is invalid.
-   * @returns the bot user object.
-   */
-  getMe(signal?: AbortSignal): Promise<TelegramUser> {
-    return this.call<TelegramUser>('getMe', {}, signal)
-  }
-
-  /**
    * Long-poll for message and callback updates. Pass the previous update id plus one to
    * acknowledge already-seen updates; `undefined` asks for any pending update.
    * @param offset - the update id to start from.
@@ -325,26 +305,6 @@ export class TelegramClient implements TelegramClientLike {
     }
     if (offset !== undefined) body.offset = offset
     return this.call<TelegramUpdate[]>('getUpdates', body, signal)
-  }
-
-  /**
-   * Send a text message, optionally with HTML parse mode.
-   * @param chatId - target chat id.
-   * @param text - the message text.
-   * @param parseMode - `HTML` when the text is Telegram-HTML, else plain text.
-   * @returns the delivered message object.
-   */
-  sendMessage(
-    chatId: number,
-    text: string,
-    parseMode?: 'HTML',
-    signal?: AbortSignal,
-    replyMarkup?: TelegramReplyMarkup,
-  ): Promise<TelegramMessage> {
-    const body: Record<string, unknown> = { chat_id: chatId, text }
-    if (parseMode !== undefined) body.parse_mode = parseMode
-    if (replyMarkup !== undefined) body.reply_markup = replyMarkup
-    return this.call<TelegramMessage>('sendMessage', body, signal)
   }
 
   /**
@@ -388,12 +348,6 @@ export class TelegramClient implements TelegramClientLike {
    */
   setMyCommands(commands: Array<{ command: string; description: string }>, signal?: AbortSignal): Promise<boolean> {
     return this.call<boolean>('setMyCommands', { commands }, signal)
-  }
-
-  editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal): Promise<TelegramMessage> {
-    const body: Record<string, unknown> = { chat_id: chatId, message_id: messageId, text }
-    if (parseMode !== undefined) body.parse_mode = parseMode
-    return this.call<TelegramMessage>('editMessageText', body, signal)
   }
 
   editMessageReplyMarkup(

@@ -30,7 +30,8 @@ export class TelegramResultCache {
     return join(this.directory, `${chatId}.json`)
   }
 
-  async deliver<T>(chatId: number, markdown: string | string[], send: (text: string) => Promise<T>): Promise<void> {
+  /** Persist `markdown` before sending it, so a failed or unrendered delivery can be resent. */
+  async deliver(chatId: number, markdown: string, send: (text: string) => Promise<unknown>): Promise<void> {
     return this.exclusive(chatId, async () => {
       await mkdir(this.directory, { recursive: true, mode: 0o700 })
       const path = this.path(chatId)
@@ -42,25 +43,24 @@ export class TelegramResultCache {
         await rm(temporary, { force: true })
       }
       // API acceptance does not guarantee that a client rendered the message.
-      for (const text of typeof markdown === 'string' ? [markdown] : markdown) await send(text)
+      await send(markdown)
     })
   }
 
+  /** Resend the cached output; `false` when this chat has none. */
   async resend(chatId: number, send: (text: string) => Promise<unknown>): Promise<boolean> {
     return this.exclusive(chatId, async () => {
-      const path = this.path(chatId)
       let raw: string
-      try { raw = await readFile(path, 'utf8') }
+      try { raw = await readFile(this.path(chatId), 'utf8') }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
         throw error
       }
       const value: unknown = JSON.parse(raw)
-      if (typeof value !== 'object' || value === null || !('markdown' in value)
-        || !(typeof value.markdown === 'string' || (Array.isArray(value.markdown)
-          && value.markdown.every(text => typeof text === 'string')))) throw new Error('Invalid Telegram result cache')
-      const messages: string[] = typeof value.markdown === 'string' ? [value.markdown] : value.markdown
-      for (const text of messages) await send(text)
+      if (typeof value !== 'object' || value === null || !('markdown' in value) || typeof value.markdown !== 'string') {
+        throw new Error('Invalid Telegram result cache')
+      }
+      await send(value.markdown)
       return true
     })
   }

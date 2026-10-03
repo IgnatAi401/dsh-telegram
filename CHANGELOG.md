@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+- Target DeepSeek Harness 0.2.0-rc.2. Install and remove through `dsh plugin --profile <name> add|remove`; the installer cleans up 0.2.x copy installations and no longer creates a dedicated `telegram` profile.
+- Create, resume and configure sessions through the Session Controller, exactly like the Web UI: sessions use the DSH default preset and model, model and reasoning choices are stored in the session and become the new default, and Agents stay owned by DSH.
+- Register the channel prompt, stream, question and approval listeners once and route them by session, so a replaced Agent keeps its Telegram binding.
+- Keep timed `ask_user_question` calls answerable after their wait expires; the late answer is steered in as a reply. Approval prompts show DSH's localized reason.
+- Reopening an archived session from `/menu` unarchives it; input to a session archived elsewhere is refused with a hint.
+- Notify the chat when final delivery fails (the result stays available through `/resend`); fix menu pages after the first one being sent as new messages instead of editing the panel.
+- Add the optional `apiBaseUrl` setting for a self-hosted Bot API server.
+- Removed: `/clear` and menu deletion (DSH has no session deletion API; use archive), the `provider`, `model`, `reasoningEffort` and `maxMessageLength` settings, the local Markdown→HTML converter, unused client methods, `probe.mjs` and the copy installer.
+
+## 0.2.x (unreleased changes)
 
 - Route DSH `approval/request` to Telegram through the existing question lifecycle, with explicit one-shot allow/reject buttons, cancellation cleanup and fail-closed delivery errors.
 

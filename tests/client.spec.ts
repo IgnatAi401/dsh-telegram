@@ -49,7 +49,7 @@ describe('TelegramClient', () => {
   it('does not silently hold the delivery queue for a long flood-control delay', async () => {
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: false, error_code: 429, parameters: { retry_after: 600 } }, 429))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl })
-    await expect(client.sendMessage(7, 'answer')).rejects.toMatchObject({ code: 429, retryAfter: 600 })
+    await expect(client.sendRichMessage(7, 'answer')).rejects.toMatchObject({ code: 429, retryAfter: 600 })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
@@ -91,7 +91,7 @@ describe('TelegramClient', () => {
       const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { message_id: 1 } }))
       fetchImpl.mockResolvedValueOnce(jsonResponse({ ok: false, error_code: 429, parameters: { retry_after: 2 } }, 429))
       const client = new TelegramClient('t:ok', { fetch: fetchImpl })
-      const sent = client.sendMessage(7, 'answer')
+      const sent = client.sendRichMessage(7, 'answer')
       await vi.advanceTimersByTimeAsync(1999)
       expect(fetchImpl).toHaveBeenCalledTimes(1)
       await vi.advanceTimersByTimeAsync(1)
@@ -106,7 +106,7 @@ describe('TelegramClient', () => {
       const fetchImpl = fetchMock(async () => jsonResponse({ ok: false, error_code: 429, parameters: { retry_after: 30 } }, 429))
       const client = new TelegramClient('t:ok', { fetch: fetchImpl })
       const controller = new AbortController()
-      const sent = client.sendMessage(7, 'answer', undefined, controller.signal).catch(error => error)
+      const sent = client.sendRichMessage(7, 'answer', controller.signal).catch(error => error)
       await vi.advanceTimersByTimeAsync(0)
       controller.abort(new Error('stopped'))
       expect(await sent).toMatchObject({ message: 'stopped' })
@@ -128,22 +128,14 @@ describe('TelegramClient', () => {
     expect(() => new TelegramClient('t:ok', { pollingTimeoutSec: 0 })).toThrow('positive integer')
   })
 
-  it('getMe returns the bot user', async () => {
-    const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { id: 1, is_bot: true } }))
-    const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).resolves.toEqual({ id: 1, is_bot: true })
-    const url = fetchImpl.mock.calls[0]?.[0] as string
-    expect(url).toBe('https://api.telegram.org/bott:ok/getMe')
-  })
-
   it('normalizes surrounding token whitespace and a trailing base URL slash', async () => {
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { id: 1, is_bot: true } }))
     const client = new TelegramClient('  t:ok  ', {
       fetch: fetchImpl as typeof fetch,
       baseUrl: 'http://localhost:8080/',
     })
-    await client.getMe()
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe('http://localhost:8080/bott:ok/getMe')
+    await client.sendChatAction(7, 'typing')
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('http://localhost:8080/bott:ok/sendChatAction')
   })
 
   it('getUpdates passes the acknowledged offset and polling timeout', async () => {
@@ -173,17 +165,6 @@ describe('TelegramClient', () => {
     expect(requestSignal?.aborted).toBe(true)
   })
 
-  it('sendMessage forwards parse mode only when requested', async () => {
-    const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { message_id: 1, chat: { id: 7, type: 'private' }, date: 0 } }))
-    const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await client.sendMessage(7, 'hi')
-    let body = JSON.parse((fetchImpl.mock.calls[0]?.[1] as RequestInit).body as string) as Record<string, unknown>
-    expect(body).toEqual({ chat_id: 7, text: 'hi' })
-    await client.sendMessage(7, '<b>hi</b>', 'HTML')
-    body = JSON.parse((fetchImpl.mock.calls[1]?.[1] as RequestInit).body as string) as Record<string, unknown>
-    expect(body).toMatchObject({ parse_mode: 'HTML' })
-  })
-
   it('sendRichMessage forwards native Markdown with inline keyboards or ForceReply', async () => {
     const fetch = fetchMock(async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } })))
     const client = new TelegramClient('token', { fetch })
@@ -206,25 +187,6 @@ describe('TelegramClient', () => {
     })
   })
 
-  it('sendMessage forwards inline keyboards and ForceReply markup', async () => {
-    const fetchImpl = fetchMock(async () => jsonResponse({
-      ok: true,
-      result: { message_id: 1, chat: { id: 7, type: 'private' }, date: 0 },
-    }))
-    const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    const keyboard = { inline_keyboard: [[{ text: 'Yes', callback_data: 'uq:token:0:o0' }]] }
-    await client.sendMessage(7, 'Choose', undefined, undefined, keyboard)
-    let body = JSON.parse((fetchImpl.mock.calls[0]?.[1] as RequestInit).body as string) as Record<string, unknown>
-    expect(body.reply_markup).toEqual(keyboard)
-
-    await client.sendMessage(7, 'Reply', undefined, undefined, {
-      force_reply: true,
-      input_field_placeholder: 'Your answer',
-    })
-    body = JSON.parse((fetchImpl.mock.calls[1]?.[1] as RequestInit).body as string) as Record<string, unknown>
-    expect(body.reply_markup).toEqual({ force_reply: true, input_field_placeholder: 'Your answer' })
-  })
-
   it('sendChatAction posts the action', async () => {
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: true }))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
@@ -235,7 +197,7 @@ describe('TelegramClient', () => {
     const edited = { message_id: 8, chat: { id: 7, type: 'private' }, date: 0 }
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: edited }))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.editMessageText(7, 8, 'updated')).resolves.toEqual(edited)
+    await expect(client.editRichMessage(7, 8, 'updated')).resolves.toEqual(edited)
 
     fetchImpl.mockImplementationOnce(async () => jsonResponse({ ok: true, result: true }))
     await expect(client.deleteMessages(7, [8])).resolves.toBe(true)
@@ -333,13 +295,13 @@ describe('TelegramClient', () => {
   it('redacts thrown non-Error values from transport errors', async () => {
     const fetchImpl = fetchMock(async () => { throw 'raw failure with bott:ok' })
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).rejects.toThrow('telegram getMe transport error: raw failure with bot***')
+    await expect(client.sendChatAction(7, 'typing')).rejects.toThrow('telegram sendChatAction transport error: raw failure with bot***')
   })
 
   it('throws a redacted error on transport failure', async () => {
     const fetchImpl = fetchMock(async () => { throw new Error('connect failed to bott:ok') })
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).rejects.toThrow('telegram getMe transport error: connect failed to bot***')
+    await expect(client.sendChatAction(7, 'typing')).rejects.toThrow('telegram sendChatAction transport error: connect failed to bot***')
   })
 
   it('throws a redacted error on a non-ok response', async () => {
@@ -348,25 +310,25 @@ describe('TelegramClient', () => {
       401,
     ))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).rejects.toThrow('telegram getMe failed: Unauthorized for bot***')
+    await expect(client.sendChatAction(7, 'typing')).rejects.toThrow('telegram sendChatAction failed: Unauthorized for bot***')
   })
 
   it('throws with the HTTP status when the response is not JSON', async () => {
     const fetchImpl = fetchMock(async () => new Response('<html>bad gateway</html>', { status: 502 }))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).rejects.toThrow('telegram getMe failed: invalid JSON response (HTTP 502)')
+    await expect(client.sendChatAction(7, 'typing')).rejects.toThrow('telegram sendChatAction failed: invalid JSON response (HTTP 502)')
   })
 
   it('rejects a successful response that omits result', async () => {
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true }))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch })
-    await expect(client.getMe()).rejects.toThrow('response omitted result')
+    await expect(client.sendChatAction(7, 'typing')).rejects.toThrow('response omitted result')
   })
 
   it('honors a custom base URL', async () => {
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { id: 1, is_bot: true } }))
     const client = new TelegramClient('t:ok', { fetch: fetchImpl as typeof fetch, baseUrl: 'http://localhost:8080' })
-    await client.getMe()
-    expect((fetchImpl.mock.calls[0]?.[0] as string).startsWith('http://localhost:8080/bott:ok/getMe')).toBe(true)
+    await client.sendChatAction(7, 'typing')
+    expect((fetchImpl.mock.calls[0]?.[0] as string).startsWith('http://localhost:8080/bott:ok/sendChatAction')).toBe(true)
   })
 })

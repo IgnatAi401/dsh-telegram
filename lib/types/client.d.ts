@@ -1,7 +1,7 @@
 /**
- * Minimal Telegram Bot API client over `fetch`: long-polling `getUpdates`,
- * `sendMessage` with HTML or plain parse modes, `sendChatAction`, and `getMe`.
- * The token is embedded in the request URL, so every error path redacts it.
+ * Minimal Telegram Bot API client over `fetch`: long polling, native Rich
+ * Markdown messages and drafts, inline keyboards, and file downloads. The
+ * token is embedded in the request URL, so every error path redacts it.
  * @module telegram/client
  */
 /** Telegram user object (sender of a message). */
@@ -99,12 +99,8 @@ export interface TelegramClientLike {
     sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
     /** Replace rich content and its inline keyboard in a single request. */
     editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
-    /** Fetch the bot identity; validates the token. */
-    getMe(signal?: AbortSignal): Promise<TelegramUser>;
     /** Long-poll for updates at or after `offset`. */
     getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
-    /** Send a message, optionally with HTML parse mode. */
-    sendMessage(chatId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
     /** Send a chat action such as `typing`. */
     sendChatAction(chatId: number, action: string, signal?: AbortSignal): Promise<boolean>;
     /** Register the bot's slash-command list (shown in the Telegram UI). */
@@ -112,8 +108,6 @@ export interface TelegramClientLike {
         command: string;
         description: string;
     }>, signal?: AbortSignal): Promise<boolean>;
-    /** Edit a previously sent message, optionally with HTML parse mode. */
-    editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal): Promise<TelegramMessage>;
     /** Replace or remove the inline keyboard below a message. */
     editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Acknowledge a callback so Telegram dismisses the button progress spinner. */
@@ -164,25 +158,12 @@ export declare class TelegramClient implements TelegramClientLike {
     /** A stalled fetch/body must never hold the chat's delivery queue indefinitely. */
     private requestWithin;
     /**
-     * Fetch the bot identity; fails when the token is invalid.
-     * @returns the bot user object.
-     */
-    getMe(signal?: AbortSignal): Promise<TelegramUser>;
-    /**
      * Long-poll for message and callback updates. Pass the previous update id plus one to
      * acknowledge already-seen updates; `undefined` asks for any pending update.
      * @param offset - the update id to start from.
      * @returns the batch of updates received within the polling timeout.
      */
     getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
-    /**
-     * Send a text message, optionally with HTML parse mode.
-     * @param chatId - target chat id.
-     * @param text - the message text.
-     * @param parseMode - `HTML` when the text is Telegram-HTML, else plain text.
-     * @returns the delivered message object.
-     */
-    sendMessage(chatId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
     /**
      * Send a chat action such as `typing`; Telegram shows it briefly while a
      * real message is on the way.
@@ -203,7 +184,6 @@ export declare class TelegramClient implements TelegramClientLike {
         command: string;
         description: string;
     }>, signal?: AbortSignal): Promise<boolean>;
-    editMessageText(chatId: number, messageId: number, text: string, parseMode?: 'HTML', signal?: AbortSignal): Promise<TelegramMessage>;
     editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
     deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;

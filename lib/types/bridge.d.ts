@@ -1,35 +1,26 @@
 /**
- * Telegram→harness bridge: owns the long-polling loop, per-chat agent
- * sessions, slash commands, and delivery of assistant output back to
- * Telegram. The design mirrors Hermes' telegram platform adapter (per-chat
- * sessions, allowlist, native Rich Markdown, inline menus, typing
- * indicator), trimmed to the harness's text-first seams.
+ * Telegram→DSH bridge: owns the long-polling loop, the chat→session binding,
+ * slash commands and menus, and delivery of each turn back to Telegram.
+ * Sessions are created, resumed and configured through the Session
+ * Controller, so Telegram and Web share sessions, models and presets.
  * @module telegram/bridge
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { TelegramClientLike } from './client.js';
-/** Reasoning levels accepted by the plugin's static configuration schema. */
-export type TelegramReasoningEffort = 'off' | 'low' | 'high' | 'max';
 /** Options for {@link TelegramBridge}. */
 export interface TelegramBridgeOptions {
     /** Bot token from @BotFather. */
     token: string;
     /** User ids allowed to talk to the bot; empty means none unless `allowAllUsers`. */
-    allowedUserIds?: number[];
+    allowedUserIds?: readonly number[];
     /** Allow any Telegram user (development only). */
     allowAllUsers?: boolean;
-    /** LLM provider id passed to each created agent. */
-    provider?: string;
-    /** Model id passed to each created agent. */
-    model?: string;
-    /** Legacy option retained for config compatibility; native rich messages are not split. */
-    maxMessageLength?: number;
+    /** Agent preset for sessions created from Telegram; omitted uses the DSH default preset. */
+    preset?: string;
     /** Long-polling timeout in seconds. */
     pollingTimeoutSec?: number;
-    /** Agent preset id mounted on each created agent (requires `agent-presets`). */
-    preset?: string;
-    /** Default reasoning effort (off|low|high|max); the menu overrides per chat. */
-    reasoningEffort?: TelegramReasoningEffort | '';
+    /** Bot API server; a self-hosted `telegram-bot-api` server lifts the 20 MiB download limit. */
+    apiBaseUrl?: string;
     /** Result cache root; defaults to DSH_HOME/telegram-results. */
     resultCacheDirectory?: string;
     /** Client seam; tests substitute a fake. */
@@ -38,81 +29,83 @@ export interface TelegramBridgeOptions {
     sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 /**
- * Bridge between Telegram chats and harness agent sessions. One agent
- * session per chat; incoming text becomes a user message via `followup`,
- * and assistant messages are delivered back as native rich
- * Telegram messages. Lifecycle: {@link TelegramBridge.start} begins polling;
- * {@link TelegramBridge.stop} releases Telegram bindings and only the Agent
- * handles that this bridge created or resumed itself.
+ * Bridge between Telegram private chats and DSH sessions. One session per
+ * chat; incoming content becomes a user message, and each turn is delivered
+ * back as one native rich Telegram message. Agents belong to DSH, so
+ * {@link TelegramBridge.stop} only releases Telegram state.
  */
 export declare class TelegramBridge {
     private readonly ctx;
     private readonly client;
     private readonly allowedUserIds;
     private readonly allowAllUsers;
-    private readonly provider;
-    private readonly model;
-    private readonly sleep;
-    /** Agent preset id mounted on each created agent; undefined leaves the composition default. */
     private readonly preset;
-    /** Default reasoning effort; undefined leaves the adapter default. */
-    private readonly defaultEffort;
+    private readonly sleep;
+    private readonly resultCache;
     private readonly chats;
     private readonly chatsBySession;
-    /** Handles owned by Telegram stay live across `/menu` switches. */
-    private readonly ownedAgents;
-    /** Explicit `/collect` drafts keyed by Telegram private-chat id. */
     private readonly collections;
     /** Human-input requests keyed by Telegram chat id; at most one per chat. */
-    private readonly resultCache;
     private readonly pendingQuestions;
-    private readonly abortController;
-    private offset;
-    private stopped;
-    private errorCount;
-    private disposeEvents;
-    private pollTask;
     private readonly menus;
+    private readonly abortController;
+    private readonly disposers;
+    private offset;
+    private started;
+    private stopped;
+    private pollTask;
     private commandTask;
     private stopTask;
     /**
-     * @param ctx - Cordis context providing `agents` (declared by the plugin's
-     * `inject`) and the session/event stream.
+     * @param ctx - Cordis context providing the services the plugin injects.
      * @param options - bridge options.
      */
     constructor(ctx: Context, options: TelegramBridgeOptions);
-    /** Register the session listener, publish the command list, and start polling. */
+    /** Register DSH listeners, publish the command list, and start polling. */
     start(): void;
+    /** Stop polling and release Telegram state; DSH sessions and Agents keep running. */
+    stop(): Promise<void>;
+    private stopImpl;
     /** Publish the slash-command list so Telegram's `/` menu matches the bot. */
     private registerCommands;
-    /** Stop polling, unregister Telegram bindings, and dispose bridge-owned Agents. */
-    stop(): Promise<void>;
-    /** Perform the single lifecycle teardown shared by all `stop()` callers. */
-    private stopImpl;
     private pollLoop;
-    /** Wait for the poll cadence/backoff, but release immediately during teardown. */
-    private wait;
-    /** Cancellation for Telegram's native Stop button. */
-    private stopCurrentTask;
-    private handleUpdate;
     private authorizedUser;
+    private handleUpdate;
+    /** Route chat input to a waiting question; returns false when the message is an ordinary command. */
+    private handleQuestionInput;
     private handleCommand;
-    /** Bind callbacks to the state shown, so an old delete cannot target a new session. */
+    /** Native Stop: cancel the running turn and any question it is waiting on. */
+    private stopCurrentTask;
+    /** Bind callbacks to the state shown, so an old button cannot act on a newer selection. */
     private menuFingerprint;
     private handleMenuCallback;
-    /** Paginated snapshot: callbacks capture stable IDs, never live catalog positions. */
+    /** Render one menu page; callbacks capture stable ids, never live catalog positions. */
     private showMenu;
-    /** Return only a draft that still belongs to the exact active session. */
+    private findModel;
+    /** Workspaces in registry order with their sessions' list metadata. */
+    private loadCatalog;
+    /** Read one session's model route (falling back to the DSH default) and title. */
+    private sessionStatus;
+    private stateFor;
+    /** The chat bound to an Agent's session, if any. */
+    private boundChat;
+    /** Resolve the live Agent through the Session Controller, resuming a cold session. */
+    private resolveAgent;
+    /** Create a session in `workspace` exactly as Web does and bind this chat to it. */
+    private createSession;
+    /** Bind this chat to an existing session, unarchiving it first when needed. */
+    private openSession;
+    private bind;
+    /** Forget the Telegram binding; the DSH session and its Agent are unaffected. */
+    private releaseActive;
+    /** Archive through the Workspace registry, then release the Telegram selection. */
+    private archiveCurrent;
+    /** Return only a collection that still belongs to the active session. */
     private collectionFor;
     /** Replace the previous collection notice only after its successor was sent. */
     private sendCollectionStatus;
-    /** Summarize an in-progress collection without exposing internal attachment ids. */
     private collectionStatus;
-    /** Route declared raster documents through the existing image pipeline. */
-    private imageDocument;
-    /** Extract one full-resolution download candidate from a Telegram message. */
-    private imageCandidate;
-    /** Explicit `/followup`: submit one message, or submit the active collection as a later turn. */
+    /** Explicit `/followup`: queue one message, or submit the active collection as a later turn. */
     private handleFollowupMessage;
     /** Add one Telegram message and its reply context to an explicit collection. */
     private addToCollection;
@@ -121,115 +114,69 @@ export declare class TelegramBridge {
     /** Build and submit one ordinary Telegram message. */
     private submitTelegramMessage;
     /**
-     * Preserve Telegram reply semantics inside the same DSH user message. Quoted
-     * text is explicitly delimited, and quoted images remain adjacent to that
-     * delimiter, so no context can leak into a different turn.
+     * Preserve Telegram reply semantics inside the same user message: quoted
+     * text is explicitly delimited and quoted media stays adjacent to it.
      */
     private telegramMessageParts;
-    /** Admit generic documents through DSH's native file attachment store. */
-    private telegramFilePart;
+    /** Download the message's image into the workspace or its document into DSH attachments. */
+    private mediaParts;
+    /** Photos and declared raster documents go through the image pipeline. */
+    private imageCandidate;
     /** Download, verify, and save one image beneath the selected workspace. */
     private downloadWorkspaceImage;
     /** Create an exclusive file under `<workspace>/telegram-downloads` without following an escaping directory link. */
     private saveWorkspaceFile;
-    /** Admit collected rasters, preserve their order, then choose steer vs. follow-up. */
+    /** Admit collected images, preserve part order, then steer a running turn or queue a follow-up. */
     private submitParts;
-    /** Return a chat state without selecting a workspace or creating an Agent. */
-    private stateFor;
-    private defaultPreferences;
-    /** Read the adapter-owned model catalog and retain the current route if it is unlisted. */
-    private loadModelCatalog;
-    /** Resolve exact metadata for the model currently selected by one chat. */
-    private resolveCurrentModel;
-    /** Resolve display metadata without preventing unrelated selectors from rendering. */
-    private currentModelInfoOrUndefined;
-    /** Apply one route to chat-owned selection or the official selection of a borrowed Agent. */
-    private applyChatSelection;
-    /** Render the current selection shared by menu pages. */
-    private formatSelectionSummary;
-    /** Offer only the exact effort ids exposed by the selected model. */
-    private reasoningChoices;
-    /** Build the current numbered workspace/session catalog. */
-    private loadCatalog;
-    /** Resolve one numbered selection and bind the Telegram chat to it. */
-    private useCatalogSelection;
-    /** Create, attach, and bind a new session in an existing workspace. */
-    private createAndBind;
-    /** Reuse a global live Agent or resume one Agent owned by this bridge. */
-    private resolveAgentForUse;
-    /** Validate ownership and apply this chat's model route to a borrowed live Agent. */
-    private prepareLiveAgent;
-    /** Initialize delivery bookkeeping and Telegram-only bindings for one Agent. */
-    private activeSession;
-    /** Publish a replacement binding only after the previous Agent is quiescent. */
-    private bind;
-    /** Forget the Telegram binding while leaving the global Agent lifecycle intact. */
-    private releaseActive;
-    /** Persist the archive flag before releasing the Telegram selection. */
-    private archiveCurrent;
-    /** Delete the current durable JSONL log and detach it from its workspace. */
-    private clearCurrent;
-    /**
-     * Agent setup hook: mount the preset and install the per-chat model route.
-     * Telegram-only channel and question listeners are attached by `bind()` so
-     * switching sessions can remove them without destroying the Agent.
-     */
-    private makeSetup;
-    /** Attach the channel prompt and question transport for one current chat binding. */
-    private attachTelegramBinding;
-    /** Reuse question delivery/lifecycle, but grant only an explicit approval button. */
+    /** Reuse question delivery and lifecycle, but grant only an explicit approval button. */
     private approveThroughTelegram;
-    /** Claim one DSH user-question request for the currently bound Telegram chat. */
+    /** Claim one DSH user-question request for the chat bound to its session. */
     private askThroughTelegram;
+    /**
+     * A timed wait expired: the tool call returns "pending" and the Agent keeps
+     * working, while the question stays answerable here. The finished answer is
+     * steered in through `userQuestions.answer`.
+     */
+    private continueTimedQuestion;
     /** Handle one inline-keyboard choice and always dismiss Telegram's callback spinner. */
     private handleCallbackQuery;
-    /** Send the current item, attaching buttons or a Telegram ForceReply composer. */
+    /** Send the current item with buttons, or with a ForceReply composer for free text. */
     private presentQuestion;
     /** Render a question with all details visible even when button labels must be shortened. */
     private formatQuestion;
     /** Build the current keyboard; multi-select choices show their checked state. */
     private questionKeyboard;
-    private questionCallbackData;
-    /** Keep button text readable without risking an oversized keyboard label. */
-    private buttonLabel;
-    /** Enter free-text mode after a user explicitly presses the custom-answer button. */
+    /** Enter free-text mode after the user explicitly presses the custom-answer button. */
     private requestCustomAnswer;
-    /** Store one answer and either present the next question or resume the Agent. */
+    /** Store one answer, then present the next question or complete the batch. */
     private submitQuestionAnswer;
     private currentQuestion;
-    /** Abort question delivery when either the bridge or the DSH request ends. */
+    /** Abort question delivery when either the bridge or a still-open DSH request ends. */
     private questionSignal;
     private selectedLabels;
     /** Update checkmarks after toggling a multi-select option. */
     private refreshQuestionKeyboard;
     /** Remove an old keyboard so it cannot submit an answer twice. */
     private clearQuestionKeyboard;
+    private editKeyboard;
     private resolvePendingQuestion;
     private rejectPendingQuestion;
     /** Atomically remove a pending request and its abort listener. */
     private settlePendingQuestion;
-    /** Callback acknowledgements are best-effort but never omitted. */
-    private safeAnswerCallback;
+    /** Question/answer messages are removed with the turn, unless the question outlives it. */
+    private trackQuestionMessage;
     private handleSessionEvent;
-    /** Serialize per-chat session-event side effects; never lets them interleave. */
+    /** Cache, then send the complete turn; a failure leaves the cache for `/resend`. */
+    private deliverResult;
+    /** Serialize per-chat Telegram side effects; they never interleave. */
     private enqueue;
-    /** Turn start: remove artifacts from an unbalanced previous turn, then show typing. */
-    private onTurnStart;
-    /** Persist the complete turn once, including its intermediate transcript. */
-    private onAssistantText;
-    /** Remove interaction artifacts after the complete turn has been delivered. */
-    private onTurnEnd;
-    /** Add a bot or user interaction message to the current turn's cleanup set. */
-    private trackTransientMessage;
-    /** Delete turn artifacts, optionally including the latest partial/final assistant step. */
-    private cleanupTurnMessages;
-    /** Delete turn artifacts in Bot API batches. */
+    /** Delete messages in Bot API batches. */
     private deleteMessageIds;
     /** Keep Telegram's typing indicator alive while a turn runs (the action expires after ~5s). */
     private startTyping;
-    /** Stop the typing heartbeat for a chat. */
     private stopTyping;
-    private chatFor;
+    /** Callback acknowledgements are best-effort but never omitted. */
+    private safeAnswerCallback;
     /** Fixed notices use the same native Rich Markdown transport as assistant replies. */
     private safeSend;
     private safeAction;

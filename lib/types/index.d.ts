@@ -1,10 +1,8 @@
 /**
- * Telegram bridge plugin: relays Telegram chats to harness agent sessions
- * through the Bot API's long polling. Copied from Hermes' telegram platform
- * adapter design — per-chat sessions, user allowlist, native rich formatting,
- * inline menus, and a typing indicator — trimmed to the harness's
- * text-first seams. The selected DSH profile supplies the LLM adapter,
- * agent spine, sessions, and tools.
+ * Telegram bridge plugin: relays Telegram private chats to DSH sessions
+ * through Bot API long polling. Sessions are created, resumed, and switched
+ * between models through the Session Controller, so they behave exactly like
+ * Web-created sessions and remain visible in the Web UI.
  *
  * @module telegram
  */
@@ -13,20 +11,22 @@ import Schema from '@deepseek-ai/schemastery';
 import type { TelegramBridgeOptions } from './bridge.js';
 export * from './bridge.js';
 export * from './client.js';
-export * from './format.js';
 export declare const name = "telegram";
 export declare const inject: string[];
 /** Telegram bridge deployment config. */
-export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token'> {
-    /** Bot token; omitted values fall back to the `DSH_TELEGRAM_TOKEN` env var. */
+export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers'> {
+    /** Bot token; empty falls back to the `DSH_TELEGRAM_TOKEN` env var. */
     token?: string;
+    /** Allowed Telegram user ids; empty falls back to `DSH_TELEGRAM_ALLOWED_USER_IDS`. */
+    allowedUserIds?: number[];
+    /** Allow any Telegram user (development only); unset falls back to `DSH_TELEGRAM_ALLOW_ALL_USERS`. */
+    allowAllUsers?: boolean;
 }
 export declare const Config: Schema<TelegramConfig>;
 /**
- * Start the Telegram bridge. Missing tokens fail loudly at load; polling and
- * session delivery run for as long as the plugin's fiber lives.
- * @param ctx - Cordis context; Agent, preset, LLM, persistence, query, and
- * Session Controller and workspace services are injected by the plugin declaration.
+ * Start the Telegram bridge. A missing token fails loudly at load; polling
+ * runs for as long as the plugin's fiber lives.
+ * @param ctx - Cordis context with the services named by {@link inject}.
  * @param config - deployment config.
  */
-export declare function apply(ctx: Context, config: TelegramConfig): Promise<void>;
+export declare function apply(ctx: Context, config: TelegramConfig): void;

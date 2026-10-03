@@ -34,7 +34,6 @@ export class TelegramProgress {
   private phase = '正在思考'
   private readonly activeTools = new Set<string>()
   private readonly transcript: TelegramTranscript
-  private lastPublished = ''
   private paused = false
   private waitingForUser = false
   private disposed = false
@@ -117,10 +116,7 @@ export class TelegramProgress {
       this.phase = '正在执行工具'
       this.changed()
     } else if (event.type === 'tool/result') {
-      for (const block of event.data.message.content) {
-        if (block.type !== 'tool-result') continue
-        this.activeTools.delete(block.toolCallId)
-      }
+      this.activeTools.delete(event.data.message.toolCallId)
       this.phase = this.activeTools.size ? '正在执行工具' : '正在整理工具结果'
       this.changed()
     } else if (event.type === 'step/start') {
@@ -176,24 +172,16 @@ export class TelegramProgress {
     return 'ℹ️ **任务已结束**'
   }
 
-  /** One rich message: folded intermediate messages followed by the answer. */
-  finalMessages(text: string): string[] {
-    const markdown = [this.processDetails(text), text].filter(part => part.trim()).join('\n\n')
-    const messages = markdown ? [markdown] : []
-    this.lastPublished = JSON.stringify(messages)
-    return messages
-  }
-
-  /** Include late tool results and reasoning-only turns in the terminal delivery. */
-  finishMessages(notice?: string): string[] | undefined {
+  /**
+   * The complete turn as one rich message: folded intermediate messages, then
+   * the answer (or `notice` when the turn produced none). Includes late tool
+   * results and reasoning-only turns; `undefined` when nothing was recorded.
+   */
+  finalMessage(notice?: string): string | undefined {
     if (this.stoppedByUser || !this.transcript.hasEntries) return undefined
-    const previous = this.lastPublished
-    const result = this.finalMessages(notice ?? this.transcript.answer)
-    return this.lastPublished === previous ? undefined : result
-  }
-
-  private processDetails(answer: string): string {
-    return this.transcript.render(answer)
+    const answer = notice ?? this.transcript.answer
+    const markdown = [this.transcript.render(answer), answer].filter(part => part.trim()).join('\n\n')
+    return markdown || undefined
   }
 
   private status(): string {
