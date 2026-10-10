@@ -22,9 +22,17 @@ curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/instal
 
 If the dsh command is not found, install it first from the app menu (Manage dsh command…). From this repository you can also run `bash install.sh` or `bash install.sh install desktop`.
 
+Windows Desktop: install the command from the app menu (Manage dsh command…), quit the app completely from the tray, then run in PowerShell:
+
+```powershell
+dsh plugin --profile desktop add github:IgnatAi401/dsh-telegram
+```
+
+You can also add `github:IgnatAi401/dsh-telegram` on the app's Plugins page. For the CLI on Windows, install inside WSL2 as above.
+
 ## Configure and use
 
-Create a bot through @BotFather on Telegram, then add to `~/.dsh/.env`:
+Create a bot through @BotFather on Telegram, then add to `~/.dsh/.env` (`%USERPROFILE%\.dsh\.env` on Windows):
 
 ```
 DSH_TELEGRAM_TOKEN=<your BotFather token>
@@ -53,4 +61,4 @@ Stop DSH, then run (append `desktop` for Desktop):
 curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- uninstall
 ```
 
-From this repository you can also run `bash install.sh uninstall`. DSH, model settings, workspaces, and history are preserved; remove the Telegram settings from `.env` yourself.
+From this repository you can also run `bash install.sh uninstall`; on Windows Desktop run `dsh plugin --profile desktop remove dsh-telegram`. DSH, model settings, workspaces, and history are preserved; remove the Telegram settings from `.env` yourself.

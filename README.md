@@ -22,9 +22,17 @@ curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/instal
 
 如提示找不到 dsh 命令，先在 App 菜单的“管理 dsh 命令…”中安装。在本仓库目录中也可以运行 `bash install.sh` 或 `bash install.sh install desktop`。
 
+Windows 桌面版：在 App 菜单的“管理 dsh 命令…”中安装命令，从托盘完全退出 App，再在 PowerShell 中运行：
+
+```powershell
+dsh plugin --profile desktop add github:IgnatAi401/dsh-telegram
+```
+
+也可以在 App 的“插件”页添加 `github:IgnatAi401/dsh-telegram`。Windows 上的命令行版请在 WSL2 中按上文安装。
+
 ## 配置与使用
 
-通过 Telegram 的 @BotFather 创建机器人，然后在 `~/.dsh/.env` 中写入：
+通过 Telegram 的 @BotFather 创建机器人，然后在 `~/.dsh/.env`（Windows 为 `%USERPROFILE%\.dsh\.env`）中写入：
 
 ```
 DSH_TELEGRAM_TOKEN=<BotFather 提供的 token>
@@ -53,4 +61,4 @@ DSH_TELEGRAM_ALLOWED_USER_IDS=<你的 Telegram 数字用户 ID>
 curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- uninstall
 ```
 
-在本仓库目录中也可以运行 `bash install.sh uninstall`。卸载保留 DSH、模型配置、工作区和历史记录；`.env` 中的 Telegram 配置需自行删除。
+在本仓库目录中也可以运行 `bash install.sh uninstall`；Windows 桌面版运行 `dsh plugin --profile desktop remove dsh-telegram`。卸载保留 DSH、模型配置、工作区和历史记录；`.env` 中的 Telegram 配置需自行删除。

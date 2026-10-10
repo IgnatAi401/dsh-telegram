@@ -45,7 +45,8 @@ fs.writeFileSync(manifest, JSON.stringify(value))
   return { home, env, run, recorded }
 }
 
-describe('install.sh', () => {
+// install.sh targets Linux / macOS; Windows uses DSH's own command (see README).
+describe.skipIf(process.platform === 'win32')('install.sh', () => {
   it('installs the checkout through dsh plugin add and removes it through dsh plugin remove', () => {
     const { run, recorded } = fixture()
     run()

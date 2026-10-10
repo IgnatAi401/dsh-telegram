@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TelegramResultCache } from '../src/result-cache.js'
 
@@ -73,4 +73,15 @@ it('keeps the output after a failed send and replays it after restart', async ()
   const resend = vi.fn(async () => {})
   expect(await restored.resend(7, resend)).toBe(true)
   expect(resend.mock.calls).toEqual([[markdown]])
+})
+
+it('resolves DSH_HOME like DSH, including the Windows ~\\ prefix and blank values', () => {
+  try {
+    for (const [value, home] of [['~\\custom', join(homedir(), 'custom')], ['~/custom', join(homedir(), 'custom')], ['  ', join(homedir(), '.dsh')]]) {
+      vi.stubEnv('DSH_HOME', value)
+      expect(new TelegramResultCache('123:secret').directory.startsWith(join(home, 'telegram-results'))).toBe(true)
+    }
+  } finally {
+    vi.unstubAllEnvs()
+  }
 })

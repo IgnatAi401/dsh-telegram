@@ -9,9 +9,10 @@ export class TelegramResultCache {
   readonly directory: string
 
   constructor(token: string, directory?: string) {
-    const configured = process.env.DSH_HOME || join(homedir(), '.dsh')
+    // Match DSH's own home resolution: blank means unset; `~`, `~/` and `~\` expand.
+    const configured = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : join(homedir(), '.dsh')
     const home = configured === '~' ? homedir()
-      : configured.startsWith('~/') ? join(homedir(), configured.slice(2)) : resolve(configured)
+      : configured.startsWith('~/') || configured.startsWith('~\\') ? join(homedir(), configured.slice(2)) : resolve(configured)
     // Bot identity survives token rotation; never put the token in a file name.
     const bot = createHash('sha256').update(token.split(':')[0]!).digest('hex')
     this.directory = join(directory ?? join(home, 'telegram-results'), bot)
