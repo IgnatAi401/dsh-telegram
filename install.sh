@@ -6,7 +6,10 @@
 #   bash install.sh [install|uninstall] [profile]          # from a checkout
 #   curl -fsSL .../install.sh | bash -s -- install [profile]
 #
-# DSH_TELEGRAM_DSH overrides the dsh command (default: npx -y @deepseek-ai/dsh).
+# The `desktop` profile belongs to DeepSeek Harness Desktop and is managed with
+# the dsh command bundled in the app, which carries its own Node.js and pnpm.
+# Other profiles use `npx -y @deepseek-ai/dsh`. DSH_TELEGRAM_DSH overrides the
+# dsh command for either.
 set -euo pipefail
 
 ACTION="${1:-install}"
@@ -21,12 +24,6 @@ if [[ ! "$PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [ "$PROFILE" = node_mod
   echo 'install: invalid profile name' >&2
   exit 2
 fi
-if ! command -v node >/dev/null 2>&1 \
-  || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 22 && minor >= 19 || major >= 24 ? 0 : 1)'; then
-  echo 'install: Node.js 22.19+ or 24+ is required' >&2
-  exit 1
-fi
-read -r -a DSH <<< "${DSH_TELEGRAM_DSH:-npx -y @deepseek-ai/dsh}"
 
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 # shellcheck disable=SC2088 # match a literal tilde supplied through the environment
@@ -36,13 +33,49 @@ case "$DSH_HOME" in
 esac
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 
-# `dsh plugin` needs pnpm on PATH; borrow one through npx when it is missing.
-if ! command -v pnpm >/dev/null 2>&1; then
-  SHIM="$(mktemp -d)"
-  trap 'rm -rf "$SHIM"' EXIT
-  printf '#!/bin/sh\nexec npx -y pnpm@11 "$@"\n' > "$SHIM/pnpm"
-  chmod +x "$SHIM/pnpm"
-  PATH="$SHIM:$PATH"
+# Desktop's bundled command on macOS; otherwise the `dsh` registered on PATH
+# through the app menu (Manage dsh command…).
+desktop_dsh() {
+  local app
+  for app in "/Applications/DeepSeek Harness.app" "$HOME/Applications/DeepSeek Harness.app"; do
+    if [ -x "$app/Contents/Resources/runtime/cli/bin/dsh" ]; then
+      printf '%s\n' "$app/Contents/Resources/runtime/cli/bin/dsh"
+      return
+    fi
+  done
+  command -v dsh 2>/dev/null || true
+}
+
+if [ "$PROFILE" = desktop ]; then
+  # Desktop must be fully quit before its profile's packages change.
+  if pgrep -x 'DeepSeek Harness' >/dev/null 2>&1; then
+    echo 'install: quit DeepSeek Harness Desktop completely first, then re-run' >&2
+    exit 1
+  fi
+  if [ -n "${DSH_TELEGRAM_DSH:-}" ]; then
+    read -r -a DSH <<< "$DSH_TELEGRAM_DSH"
+  else
+    DSH=("$(desktop_dsh)")
+    if [ -z "${DSH[0]}" ]; then
+      echo 'install: the dsh command of DeepSeek Harness Desktop was not found; register it from the app menu (Manage dsh command…)' >&2
+      exit 1
+    fi
+  fi
+else
+  if ! command -v node >/dev/null 2>&1 \
+    || ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 22 && minor >= 19 || major >= 24 ? 0 : 1)'; then
+    echo 'install: Node.js 22.19+ or 24+ is required' >&2
+    exit 1
+  fi
+  read -r -a DSH <<< "${DSH_TELEGRAM_DSH:-npx -y @deepseek-ai/dsh}"
+  # `dsh plugin` needs pnpm on PATH; borrow one through npx when it is missing.
+  if ! command -v pnpm >/dev/null 2>&1; then
+    SHIM="$(mktemp -d)"
+    trap 'rm -rf "$SHIM"' EXIT
+    printf '#!/bin/sh\nexec npx -y pnpm@11 "$@"\n' > "$SHIM/pnpm"
+    chmod +x "$SHIM/pnpm"
+    PATH="$SHIM:$PATH"
+  fi
 fi
 
 # Releases up to 0.2.x copied the plugin into the profile and inserted a
@@ -69,11 +102,9 @@ remove_copy_install() {
   fi
 }
 
+# Only `dependencies` uses the package name as a key; the bundle list holds it as a value.
 installed_by_pnpm() {
-  [ -f "$PROFILE_DIR/package.json" ] && node -e '
-    const manifest = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
-    process.exit(Object.hasOwn(manifest.dependencies ?? {}, process.argv[2]) ? 0 : 1)
-  ' "$PROFILE_DIR/package.json" "$PACKAGE"
+  [ -f "$PROFILE_DIR/package.json" ] && grep -qE "\"$PACKAGE\"[[:space:]]*:" "$PROFILE_DIR/package.json"
 }
 
 remove_copy_install
@@ -98,10 +129,15 @@ else
   SPEC="$REMOTE_SPEC"
 fi
 "${DSH[@]}" plugin --profile "$PROFILE" add "$SPEC"
+if [ "$PROFILE" = desktop ]; then
+  START='reopen DeepSeek Harness Desktop'
+else
+  START="start DSH with: npx @deepseek-ai/dsh --profile $PROFILE"
+fi
 cat <<EOF
 
-installed $PACKAGE into profile $PROFILE. Start DSH with:
-  export DSH_TELEGRAM_TOKEN='<bot token>'
-  export DSH_TELEGRAM_ALLOWED_USER_IDS='<your numeric Telegram user id>'
-  npx @deepseek-ai/dsh --profile $PROFILE
+installed $PACKAGE into profile $PROFILE. Put the bot settings in $DSH_HOME/.env:
+  DSH_TELEGRAM_TOKEN=<bot token>
+  DSH_TELEGRAM_ALLOWED_USER_IDS=<your numeric Telegram user id>
+then $START.
 EOF

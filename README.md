@@ -1,65 +1,56 @@
 # DSH Telegram
 
-[简体中文](README.zh.md)
+[English](README.en.md)
 
-A Telegram bot plugin for DeepSeek Harness, primarily for Linux / WSL2. Chat with agents and send images and files in private Telegram chats, sharing workspaces and sessions with the Web UI.
+DeepSeek Harness 的 Telegram 机器人插件，主要用于 Linux / WSL2，也支持桌面版。在 Telegram 私聊中与 Agent 对话、发送图片和文件，并与 Web UI 共享工作区和会话。
 
-Developed against **DeepSeek Harness v0.2.0-rc.2**. Installation goes through DSH's own `dsh plugin` command, which checks version compatibility at startup.
+基于 **DeepSeek Harness v0.2.0-rc.2** 开发，通过 DSH 自带的 `dsh plugin` 安装。
 
-## Install
+## 安装
 
-Requires Bash and Node.js 22.19+ (22.x) or 24+ with npm/npx; online installation also requires curl. pnpm is used when present, otherwise fetched through npx. No global DSH installation or DSH source checkout is needed. Upgrading from 0.2.x removes the old copied installation automatically.
-
-Install online:
+命令行版（`npx @deepseek-ai/dsh` 启动）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- install
 ```
 
-Or run from this repository:
+桌面版：先完全退出 App，再运行：
 
 ```bash
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- install desktop
 ```
 
-## Configure and use
+如提示找不到 dsh 命令，先在 App 菜单的“管理 dsh 命令…”中安装。在本仓库目录中也可以运行 `bash install.sh` 或 `bash install.sh install desktop`。
 
-Create a bot through @BotFather on Telegram, then configure it in the terminal that starts DSH:
+## 配置与使用
 
-```bash
-export DSH_TELEGRAM_TOKEN='<your BotFather token>'
-export DSH_TELEGRAM_ALLOWED_USER_IDS='<your numeric Telegram user ID>'
-npx @deepseek-ai/dsh web
+通过 Telegram 的 @BotFather 创建机器人，然后在 `~/.dsh/.env` 中写入：
+
+```
+DSH_TELEGRAM_TOKEN=<BotFather 提供的 token>
+DSH_TELEGRAM_ALLOWED_USER_IDS=<你的 Telegram 数字用户 ID>
 ```
 
-Separate multiple user IDs with commas. Only private chats and allowed users are supported. Keep tokens out of Git.
+多个用户 ID 用逗号分隔。仅支持私聊，只有允许的用户可以访问。
 
-Configure model credentials and create a workspace in the Web UI, then open a private chat with the bot:
+启动 DSH：命令行版运行 `npx @deepseek-ai/dsh web`，桌面版直接打开 App。在 Web UI 配置模型凭据并创建工作区后，私聊机器人：
 
-- `/menu`: select a workspace, create, open or archive sessions, and switch models and reasoning effort.
-- `/help`: list available commands.
-- Send text, images, or files to start chatting.
+- `/menu`：选择工作区，新建、打开或归档会话，切换模型和推理强度。
+- `/help`：查看可用命令。
+- 直接发送文字、图片或文件开始对话。
 
-Provide the environment variables on every launch. Do not run multiple bot processes with the same token.
+同一个 token 不要同时运行多个机器人进程。使用其他运行配置时，在安装和卸载命令末尾写上配置名，并用 `npx @deepseek-ai/dsh --profile 配置名` 启动；自定义 `DSH_HOME` 时，`.env` 放在该目录下。
 
-Defaults are the `web` profile and the `~/.dsh` data directory. If you customize `DSH_TELEGRAM_PROFILE` or `DSH_HOME`, use matching settings for installation, removal, and startup. Start other profiles with `npx @deepseek-ai/dsh --profile NAME`.
+## 更新
 
-## Update
+停止 DSH（桌面版需完全退出），重新执行安装命令，再启动 DSH。使用本地仓库时，先 `git pull` 再运行 `bash install.sh`。
 
-Stop DSH and run the online installation command again. For a local checkout, get the latest code, run `pnpm install --frozen-lockfile && pnpm build`, then `bash install.sh`. Restart DSH afterward.
+## 卸载
 
-## Uninstall
-
-Stop DSH, then run:
+停止 DSH 后运行（桌面版在末尾加 `desktop`）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IgnatAi401/dsh-telegram/main/install.sh | bash -s -- uninstall
 ```
 
-Or run from this repository:
-
-```bash
-bash install.sh uninstall
-```
-
-DSH, model settings, workspaces, and history are preserved. Remove manually added Telegram configuration yourself.
+在本仓库目录中也可以运行 `bash install.sh uninstall`。卸载保留 DSH、模型配置、工作区和历史记录；`.env` 中的 Telegram 配置需自行删除。

@@ -86,6 +86,27 @@ describe('install.sh', () => {
     expect(recorded()).toEqual([])
   })
 
+  it('manages the desktop profile without Node.js and refuses while Desktop runs', () => {
+    const { home } = fixture()
+    const bin = join(home, 'bin')
+    mkdirSync(bin)
+    const calls = join(home, 'desktop-calls.log')
+    writeFileSync(join(bin, 'fake-dsh'), `#!/bin/sh\necho "$@" >> '${calls}'\n`)
+    writeFileSync(join(bin, 'pgrep'), '#!/bin/sh\nexit "${RUNNING:-1}"\n')
+    chmodSync(join(bin, 'fake-dsh'), 0o755)
+    chmodSync(join(bin, 'pgrep'), 0o755)
+    // No Node.js or pnpm on PATH: Desktop's command carries its own runtime.
+    const env = { HOME: home, DSH_HOME: home, PATH: `${bin}:/usr/bin:/bin`, DSH_TELEGRAM_DSH: join(bin, 'fake-dsh') }
+    const install = (extra: Record<string, string> = {}) =>
+      spawnSync('/bin/bash', [installer, 'install', 'desktop'], { env: { ...env, ...extra }, encoding: 'utf8' })
+    expect(install({ RUNNING: '0' }).status).toBe(1)
+    expect(existsSync(calls)).toBe(false)
+    const result = install()
+    expect(result.status).toBe(0)
+    expect(readFileSync(calls, 'utf8').trim()).toBe(`plugin --profile desktop add file:${root.replace(/\/$/, '')}`)
+    expect(result.stdout).toContain('reopen DeepSeek Harness Desktop')
+  })
+
   it('installs the GitHub repository when piped through stdin', () => {
     const { env, recorded } = fixture()
     const result = spawnSync('bash', ['-s', '--', 'install'], { env, input: readFileSync(installer), encoding: 'utf8', cwd: tmpdir() })
