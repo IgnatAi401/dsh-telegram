@@ -473,13 +473,14 @@ describe('TelegramBridge turn delivery', () => {
     expect(h.sent.filter(entry => entry.text === '**完成**')).toHaveLength(2)
   })
 
-  it('folds intermediate messages and tool counts before the answer', async () => {
+  it('shows intermediate messages while running, then replaces them with the folded final message', async () => {
     const h = createHarness()
     const agent = await h.newSession()
     const id = agent.session.id
     h.emit(id, { type: 'turn/start', data: { turn: 1 } })
     h.emit(id, { type: 'step/start', data: { turn: 1, step: 1 } })
     h.emit(id, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '先看看' }, { type: 'tool-call', id: 't' }] } } } as Partial<SessionEvent>)
+    const intermediate = await waitFor(() => h.sent.find(entry => entry.text === '先看看'), 'intermediate message')
     h.emit(id, { type: 'tool/call', data: { turn: 1, step: 1, callId: 't', name: 'read', arguments: '{}' } } as Partial<SessionEvent>)
     h.emit(id, { type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1, message: { toolCallId: 't', content: [] } } } as Partial<SessionEvent>)
     h.emit(id, { type: 'step/start', data: { turn: 1, step: 2 } })
@@ -487,6 +488,7 @@ describe('TelegramBridge turn delivery', () => {
     h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     const final = await waitFor(() => h.sent.find(entry => entry.text.endsWith('答案'))?.text, 'final')
     expect(final).toMatch(/^<details><summary>1 次工具调用 · 1 条消息<\/summary>\n\n先看看\n\n<\/details>\n\n答案$/)
+    await waitFor(() => h.client.deleteMessages.mock.calls.some(call => (call[1] as number[]).includes(intermediate.messageId)), 'cleanup')
   })
 
   it('reports failed turns and ignores sessions not bound to Telegram', async () => {
@@ -553,6 +555,23 @@ describe('TelegramBridge questions and approvals', () => {
     await expect(answer).resolves.toEqual({ answers: [{ id: 'q', selected: ['B'] }] })
     h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     await waitFor(() => h.client.deleteMessages.mock.calls.some(call => (call[1] as number[]).includes(questionId)), 'cleanup')
+  })
+
+  it('shows the question below the intermediate message that asked it, and removes both after the turn', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
+    h.emit(agent.session.id, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '已检查配置' }, { type: 'tool-call', id: 'q' }] } } } as Partial<SessionEvent>)
+    const answer = h.waterfall('user-questions/request', { agent, questions: [question] }, async () => ({ answers: [] }))
+    await waitFor(() => h.lastText().includes('选哪个？'), 'question')
+    const intermediate = h.sent.at(-2)!
+    expect(intermediate.text).toBe('已检查配置')
+    await h.click('1. A')
+    await answer
+    h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const questionId = h.sent.find(entry => entry.text.includes('选哪个？'))!.messageId
+    await waitFor(() => h.client.deleteMessages.mock.calls.length > 0, 'cleanup')
+    expect(h.client.deleteMessages.mock.calls.flatMap(call => call[1] as number[])).toEqual(expect.arrayContaining([intermediate.messageId, questionId]))
   })
 
   it('accepts typed answers and delegates questions from unbound sessions', async () => {

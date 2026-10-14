@@ -6,21 +6,24 @@ import type { TelegramClientLike } from './client.js'
 import { escapeHtml } from './format.js'
 import { richBody, TelegramTranscript } from './transcript.js'
 
-const LONG_PREVIEW = '回复较长，完整内容将在任务结束后显示。'
+const LONG_PREVIEW = '回复较长，完整内容将在生成完成后显示。'
 
 function previewText(text: string, overflow: boolean): string {
   return overflow ? LONG_PREVIEW
-    : /<\/?(?:details|summary)\b/i.test(text) ? '折叠内容将在任务结束后显示。'
+    : /<\/?(?:details|summary)\b/i.test(text) ? '折叠内容将在生成完成后显示。'
     : text
 }
 
 /**
- * One turn's disposable preview. Events mutate bounded state synchronously; a
- * coalescer sends only the latest snapshot through the bridge's delivery queue.
- * No tool arguments or result bodies are copied into the preview.
+ * One turn's Telegram output while it runs. Intermediate assistant messages are
+ * sent as temporary real messages, removed once the final message (folded
+ * process record plus answer) is delivered; a disposable draft previews only
+ * the text being generated. Events mutate bounded state synchronously; a
+ * coalescer sends only the latest draft through the bridge's delivery queue.
+ * No tool arguments or results are shown.
  */
 export class TelegramProgress {
-  private readonly draftId = randomInt(1, 2 ** 31)
+  private draftId = randomInt(1, 2 ** 31)
   private readonly started = Date.now()
   private readonly abort = new AbortController()
   private readonly signal: AbortSignal
@@ -28,12 +31,12 @@ export class TelegramProgress {
   private attempt: AssistantStreamFrame['attemptId'] | undefined
   private revision = -1
   private text = ''
-  private committedPreview = ''
-  private committedOverflow = false
+  /** The latest message without tool calls, previewed until the turn goes on. */
+  private answer = ''
   private previewOverflow = false
   private phase = '正在思考'
   private readonly activeTools = new Set<string>()
-  private readonly transcript: TelegramTranscript
+  private readonly transcript = new TelegramTranscript()
   private paused = false
   private waitingForUser = false
   private disposed = false
@@ -47,12 +50,14 @@ export class TelegramProgress {
   constructor(
     private readonly client: TelegramClientLike,
     private readonly chatId: number,
-    signal: AbortSignal,
+    /** Aborted when the bridge stops; real messages outlive the turn's draft. */
+    private readonly stopSignal: AbortSignal,
     private readonly enqueue: (task: () => Promise<void>) => Promise<void>,
     private readonly warn: (error: unknown) => void,
+    /** Record a temporary message for removal after final delivery. */
+    private readonly track: (messageId: number) => void,
   ) {
-    this.transcript = new TelegramTranscript()
-    this.signal = AbortSignal.any([signal, this.abort.signal])
+    this.signal = AbortSignal.any([stopSignal, this.abort.signal])
     this.timer = setInterval(() => this.schedule(), 1200)
     this.schedule()
   }
@@ -98,15 +103,13 @@ export class TelegramProgress {
     this.transcript.event(event)
     if (event.type === 'assistant/message') {
       if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return
-      // Transfer the authoritative message into the preview history exactly
-      // once. Status changes and new attempts must not erase completed steps.
-      const text = event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
-      const body = richBody(previewText(text, text.length > 16000))
-      const combined = [this.committedPreview, body].filter(part => part.trim()).join('\n\n---\n\n')
-      if (!this.committedOverflow) {
-        if (combined.length > 16000) this.committedOverflow = true
-        else this.committedPreview = combined
-      }
+      const content = event.data.message.content
+      const text = content.filter(block => block.type === 'text').map(block => block.text).join('')
+      this.flushAnswer()
+      // A message that calls tools is always followed by another step. One
+      // without tools is the turn's answer unless the turn continues.
+      if (content.some(block => block.type === 'tool-call')) this.publish(text)
+      else this.answer = text
       this.text = ''
       this.previewOverflow = false
       this.attempt = undefined
@@ -120,11 +123,40 @@ export class TelegramProgress {
       this.phase = this.activeTools.size ? '正在执行工具' : '正在整理工具结果'
       this.changed()
     } else if (event.type === 'step/start') {
+      this.flushAnswer()
       this.text = ''
       this.previewOverflow = false
       this.phase = `正在思考 · 第 ${event.data.step} 步`
       this.changed()
     }
+  }
+
+  /** The held answer turned out to be intermediate: the turn went on. */
+  private flushAnswer(): void {
+    this.publish(this.answer)
+    this.answer = ''
+  }
+
+  /**
+   * Send an intermediate message as a temporary real message. Any bot message
+   * clears Telegram's draft, and streaming the same draft_id again replays it
+   * from empty, so later previews continue in a fresh draft.
+   */
+  private publish(text: string): void {
+    if (!text.trim()) return
+    this.newDraft()
+    void this.enqueue(async () => {
+      try {
+        this.track((await this.client.sendRichMessage(this.chatId, richBody(text), this.stopSignal)).message_id)
+      } catch (error) {
+        if (!this.stopSignal.aborted) this.warn(error)
+      }
+    })
+  }
+
+  private newDraft(): void {
+    this.epoch++
+    this.draftId = randomInt(1, 2 ** 31)
   }
 
   private changed(): void {
@@ -139,9 +171,11 @@ export class TelegramProgress {
     this.epoch++
   }
 
+  /** The question message clears the draft; continue in a fresh one afterwards. */
   suspend(): void {
     this.waitingForUser = true
     this.pause()
+    this.newDraft()
   }
 
   resume(): void {
@@ -214,23 +248,24 @@ export class TelegramProgress {
         }
       } finally {
         this.scheduled = false
+        // Superseded by a real message or a new draft: follow up right away.
+        if (epoch !== this.epoch) this.schedule()
       }
     })
   }
 
-  private async send(): Promise<void> {
-    const status = this.status()
-    // One stable draft per turn: replacing its ID makes Telegram remove and
-    // recreate the preview on every update.
+  private preview(): string {
     // Partial disclosures may have only a summary (or an unfinished body).
     // Leave them to committed delivery, where the complete source is available.
-    let current = previewText(this.text, this.previewOverflow)
-    if (this.committedOverflow || this.committedPreview.length + current.length > 16000) current = LONG_PREVIEW
-    const preview = [
-      this.committedPreview.trim() ? `### 处理进展\n\n${this.committedPreview}` : '',
-      current.trim() ? `### 正在生成\n\n${richBody(current)}` : '',
-    ].filter(Boolean).join('\n\n---\n\n')
+    const current = this.text || this.previewOverflow ? previewText(this.text, this.previewOverflow)
+      : previewText(this.answer, this.answer.length > 16000)
+    return current.trim() ? richBody(current) : ''
+  }
+
+  private async send(): Promise<void> {
+    // One stable draft between real messages: replacing its ID makes Telegram
+    // remove and recreate the preview on every update.
     await this.client.sendRichMessageDraft(this.chatId, this.draftId,
-      `<tg-thinking>${escapeHtml(status)}</tg-thinking>\n\n${preview}`, this.signal)
+      `<tg-thinking>${escapeHtml(this.status())}</tg-thinking>\n\n${this.preview()}`, this.signal)
   }
 }

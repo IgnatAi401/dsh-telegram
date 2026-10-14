@@ -14,17 +14,24 @@ function setup() {
   vi.setSystemTime(100000)
   const client = {
     sendRichMessageDraft: vi.fn(async () => true),
-    sendRichMessage: vi.fn(),
+    sendRichMessage: vi.fn(async () => ({ message_id: 31 })),
   }
   let queue = Promise.resolve()
   const warn = vi.fn()
+  const track = vi.fn()
   progress = new TelegramProgress(client as unknown as TelegramClientLike, 7, new AbortController().signal,
-    task => { queue = queue.then(task); return queue }, warn)
-  return { client, warn, drain: () => queue, p: progress }
+    task => { queue = queue.then(task); return queue }, warn, track)
+  // Wait for follow-up tasks enqueued while draining as well.
+  const drain = async () => { for (let current; current !== queue;) await (current = queue) }
+  return { client, warn, track, drain, p: progress }
 }
 
 function commit(p: TelegramProgress, text: string) {
   p.event({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } } as SessionEvent)
+}
+
+function tooling(p: TelegramProgress, text: string) {
+  p.event({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }, { type: 'tool-call', id: 't' }] } } } as SessionEvent)
 }
 
 function start(p: TelegramProgress, attemptId = 'a', revision = 1) {
@@ -37,82 +44,79 @@ function chunk(p: TelegramProgress, text: string, revision: number, attemptId = 
 }
 
 describe('TelegramProgress', () => {
-  it('separates committed messages and formats an unfinished streaming code block', async () => {
+  it('sends tool-calling messages as real messages and previews only the text being generated', async () => {
     const { p, client, drain } = setup()
-    for (const text of ['**检查项目**\n\n- 配置正常', '```sh\npnpm test']) {
-      p.event({ type: 'assistant/message', data: {
-        message: { content: [{ type: 'text', text }] },
-      } } as SessionEvent)
-    }
+    tooling(p, '**检查项目**\n\n- 配置正常')
+    tooling(p, '```sh\npnpm test')
     start(p)
     chunk(p, '```ts\nconst ok = true', 2)
     await drain()
+    expect(client.sendRichMessage.mock.calls.map(call => call[1]))
+      .toEqual(['**检查项目**\n\n- 配置正常', '```sh\npnpm test\n```'])
     const preview = String(client.sendRichMessageDraft.mock.calls.at(-1)?.[2])
-    expect(preview).toContain('### 处理进展\n\n**检查项目**\n\n- 配置正常\n\n---\n\n```sh\npnpm test\n```')
-    expect(preview).toContain('\n\n---\n\n### 正在生成\n\n```ts\nconst ok = true\n```')
+    expect(preview).toMatch(/<\/tg-thinking>\n\n```ts\nconst ok = true\n```$/)
+    expect(preview).not.toContain('检查项目')
     chunk(p, '\n```\n\n完成', 3)
     await vi.advanceTimersByTimeAsync(1200)
     expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain('```ts\nconst ok = true\n```\n\n完成')
   })
 
-  it('retains committed text through tool status, heartbeat, new steps and retries without duplication', async () => {
+  it('continues in a fresh draft after each real message, so Telegram never replays it', async () => {
     const { p, client, drain } = setup()
     start(p)
-    chunk(p, '已经显示的正文', 2)
+    chunk(p, '先看看', 2)
     await drain()
-    const commit = (text: string) => p.event({ type: 'assistant/message', data: {
-      message: { content: [{ type: 'text', text }] },
-    } } as SessionEvent)
-    const check = async () => {
-      await vi.advanceTimersByTimeAsync(1200)
-      const preview = String(client.sendRichMessageDraft.mock.calls.at(-1)?.[2])
-      expect(preview.match(/已经显示的正文/g)).toHaveLength(1)
-      return preview
-    }
-    commit('已经显示的正文')
-    await check()
+    tooling(p, '先看看')
     p.event({ type: 'tool/call', time: 100000, data: { callId: 't', name: 'bash' } } as SessionEvent)
-    expect(await check()).toContain('正在执行工具')
-    p.event({ type: 'tool/result', data: { message: { toolCallId: 't', content: [] } } } as SessionEvent)
-    expect(await check()).toContain('正在整理工具结果')
-    await vi.advanceTimersByTimeAsync(12000)
-    await check()
-    p.event({ type: 'step/start', data: { step: 2 } } as SessionEvent)
-    await check()
-    start(p, 'b', 3)
-    await check()
-    chunk(p, '废弃尝试', 4, 'b')
-    await check()
-    start(p, 'c', 5)
-    expect(await check()).not.toContain('废弃尝试')
-    chunk(p, '新的正文', 6, 'c')
-    expect(await check()).toContain('新的正文')
-    commit('新的正文')
-    expect((await check()).match(/新的正文/g)).toHaveLength(1)
-    chunk(p, '迟到内容', 7, 'c')
-    expect(await check()).not.toContain('迟到内容')
-    expect(new Set(client.sendRichMessageDraft.mock.calls.map(call => call[1])).size).toBe(1)
-    expect(client.sendRichMessage).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1200)
+    const ids = client.sendRichMessageDraft.mock.calls.map(call => call[1])
+    expect(new Set(ids).size).toBe(2)
+    const last = String(client.sendRichMessageDraft.mock.calls.at(-1)?.[2])
+    expect(last).toContain('正在执行工具')
+    expect(last).not.toContain('先看看')
+    expect(client.sendRichMessage).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps earlier preview text when subsequent content is deferred or exceeds the preview budget', async () => {
-    const { p, client } = setup()
-    const commit = (text: string) => p.event({ type: 'assistant/message', data: {
-      message: { content: [{ type: 'text', text }] },
-    } } as SessionEvent)
-    commit('已保留正文')
-    commit('<details><summary>补充</summary>内容</details>')
-    commit('长'.repeat(15950))
-    commit('额外'.repeat(100))
-    start(p)
-    chunk(p, '新'.repeat(17000), 2)
+  it('holds a message without tool calls as the answer, and sends it once the turn goes on', async () => {
+    const { p, client, drain } = setup()
+    commit(p, '看起来是答案')
+    await drain()
+    expect(client.sendRichMessage).not.toHaveBeenCalled()
+    expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain('看起来是答案')
+    p.event({ type: 'step/start', data: { step: 2 } } as SessionEvent)
+    commit(p, '真正的答案')
+    await drain()
+    expect(client.sendRichMessage.mock.calls.map(call => call[1])).toEqual(['看起来是答案'])
+    expect(p.finalMessage()).toMatch(/^<details><summary>0 次工具调用 · 1 条消息<\/summary>\n\n看起来是答案\n\n<\/details>\n\n真正的答案$/)
+  })
+
+  it('never sends reasoning, tool arguments or tool results', async () => {
+    const { p, client, drain } = setup()
+    p.event({ type: 'assistant/message', data: { message: { content: [
+      { type: 'reasoning', text: '先检查状态' }, { type: 'text', text: '正在检查' }, { type: 'tool-call', id: 'a' },
+    ] } } } as SessionEvent)
+    p.event({ type: 'tool/call', time: 100000, data: { callId: 'a', name: 'read', arguments: '{"path":"a.ts"}' } } as SessionEvent)
+    p.event({ type: 'tool/result', time: 101000, data: { message: { toolCallId: 'a', isError: true, content: [{ type: 'text', text: '文件不存在' }] } } } as SessionEvent)
+    p.event({ type: 'assistant/message', data: { message: { content: [
+      { type: 'reasoning', text: '整理结果' }, { type: 'text', text: '**最终答案**' },
+    ] } } } as SessionEvent)
     await vi.advanceTimersByTimeAsync(1200)
-    const preview = String(client.sendRichMessageDraft.mock.calls.at(-1)?.[2])
-    expect(preview).toContain('已保留正文')
-    expect(preview).toContain('折叠内容将在任务结束后显示')
-    expect(preview).toContain('回复较长')
-    expect(preview.length).toBeLessThan(16500)
-    expect(preview).not.toContain('<details>')
+    await drain()
+    const output = [...client.sendRichMessage.mock.calls, ...client.sendRichMessageDraft.mock.calls]
+      .map(call => String(call[1]) + String(call[2])).join('\n')
+    expect(output).toContain('正在检查')
+    expect(output).not.toMatch(/先检查状态|整理结果|a\.ts|文件不存在|read/)
+  })
+
+  it('never sends abandoned streaming attempts', async () => {
+    const { p, client, drain } = setup()
+    start(p)
+    chunk(p, '丢弃的草稿', 2)
+    for (let i = 0; i < 5; i++) tooling(p, `步骤 ${i}`)
+    commit(p, '答案')
+    await drain()
+    expect(client.sendRichMessage.mock.calls.map(call => call[1])).toEqual(['步骤 0', '步骤 1', '步骤 2', '步骤 3', '步骤 4'])
+    expect(p.finalMessage()).toMatch(/<\/details>\n\n答案$/)
   })
 
   it('folds intermediate messages and counts without reasoning or tool details', () => {
@@ -132,13 +136,6 @@ describe('TelegramProgress', () => {
     expect(result.match(/最终答案/g)).toHaveLength(1)
     expect(result).toMatch(/<\/details>\n\n\*\*最终答案\*\*$/)
     expect(result).not.toContain('<details open')
-  })
-
-  it('omits the process record when only an answer exists, and nothing for an empty turn', () => {
-    const { p } = setup()
-    expect(p.finalMessage()).toBeUndefined()
-    commit(p, '只有正文')
-    expect(p.finalMessage()).toBe('只有正文')
   })
 
   it('retains all committed steps, but never abandoned streaming attempts', () => {
@@ -170,19 +167,6 @@ describe('TelegramProgress', () => {
     expect(p.finalMessage('任务已完成')).toBeUndefined()
   })
 
-  it('aborts an in-flight draft on disposal so final delivery can proceed', async () => {
-    const { p, client, drain } = setup()
-    client.sendRichMessageDraft.mockImplementationOnce((...args: unknown[]) => new Promise((_resolve, reject) => {
-      const signal = args[3] as AbortSignal
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-    }))
-    await vi.advanceTimersByTimeAsync(0)
-    expect(client.sendRichMessageDraft).toHaveBeenCalledTimes(1)
-    p.dispose()
-    await drain()
-    expect(vi.getTimerCount()).toBe(0)
-  })
-
   it('preserves code source for the native rich parser', () => {
     const { p } = setup()
     commit(p, 'Before\n\n```ts\nconst a = 1\n```\n\nAfter')
@@ -190,21 +174,6 @@ describe('TelegramProgress', () => {
     expect(html).toBe('Before\n\n```ts\nconst a = 1\n```\n\nAfter')
     expect(html).not.toContain('<p><pre>')
     expect(html).toContain('After')
-  })
-
-  it('uses native formatting for both streamed previews and persisted replies', async () => {
-    const { p, client, drain } = setup()
-    const text = '# 标题\n\n| 项目 | 说明 |\n|---|---|\n| 粗体 | **正常** |\n\n---'
-    start(p)
-    chunk(p, text, 2)
-    await drain()
-    commit(p, text)
-    const final = p.finalMessage(text)!
-    expect(final).toBe(text)
-    expect(final).toContain('# 标题')
-    expect(final).toContain('---')
-    expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain(final)
-    expect(final).not.toContain('<pre>')
   })
 
   it('preserves every streamed formula prefix and does not append metadata inside unfinished code', async () => {
@@ -252,6 +221,77 @@ describe('TelegramProgress', () => {
     expect(message?.endsWith('</details>\n\n' + answer)).toBe(true)
   })
 
+  it('aborts an in-flight draft on disposal so final delivery can proceed', async () => {
+    const { p, client, drain } = setup()
+    client.sendRichMessageDraft.mockImplementationOnce((...args: unknown[]) => new Promise((_resolve, reject) => {
+      const signal = args[3] as AbortSignal
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.sendRichMessageDraft).toHaveBeenCalledTimes(1)
+    p.dispose()
+    await drain()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('preserves code source for the native rich parser', () => {
+    const { p } = setup()
+    commit(p, 'Before\n\n```ts\nconst a = 1\n```\n\nAfter')
+    const html = p.finalMessage('Before\n\n```ts\nconst a = 1\n```\n\nAfter')!
+    expect(html).toBe('Before\n\n```ts\nconst a = 1\n```\n\nAfter')
+    expect(html).not.toContain('<p><pre>')
+    expect(html).toContain('After')
+  })
+
+  it('uses native formatting for both streamed previews and persisted replies', async () => {
+    const { p, client, drain } = setup()
+    const text = '# 标题\n\n| 项目 | 说明 |\n|---|---|\n| 粗体 | **正常** |\n\n---'
+    start(p)
+    chunk(p, text, 2)
+    await drain()
+    commit(p, text)
+    const final = p.finalMessage(text)!
+    expect(final).toBe(text)
+    expect(final).toContain('# 标题')
+    expect(final).toContain('---')
+    expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain(final)
+    expect(final).not.toContain('<pre>')
+  })
+
+  it.each(richExamples)('sends intermediate messages with native rich formatting: %s', async (_name, source) => {
+    const { p, client, drain } = setup()
+    tooling(p, source)
+    await drain()
+    expect(client.sendRichMessage.mock.calls[0]?.[1]).toBe(source)
+  })
+
+  it('closes unfinished syntax in an intermediate message', async () => {
+    const { p, client, drain } = setup()
+    tooling(p, '<details><summary>附注</summary>\n\n内容')
+    await drain()
+    expect(client.sendRichMessage.mock.calls[0]?.[1]).toBe('<details><summary>附注</summary>\n\n内容\n\n</details>')
+  })
+
+  it('still sends a queued intermediate message after the turn ends, and records it for removal', async () => {
+    const { p, client, track, drain } = setup()
+    tooling(p, '最后一步')
+    p.dispose()
+    await drain()
+    expect(client.sendRichMessage.mock.calls.map(call => call[1])).toEqual(['最后一步'])
+    expect(track).toHaveBeenCalledWith(31)
+  })
+
+  it('logs a failed intermediate message and keeps going', async () => {
+    const { p, client, drain, warn } = setup()
+    const error = new TelegramApiError('message is too long', 400)
+    client.sendRichMessage.mockRejectedValueOnce(error)
+    tooling(p, '太长')
+    commit(p, '答案')
+    await drain()
+    expect(warn).toHaveBeenCalledWith(error)
+    expect(p.finalMessage()).toMatch(/太长[\s\S]*答案$/)
+  })
+
   it('keeps the other tool running when parallel results arrive out of order', async () => {
     const { p, client, drain } = setup()
     for (const callId of ['a', 'b']) {
@@ -295,7 +335,7 @@ describe('TelegramProgress', () => {
     expect(html).not.toMatch(/旧答案|迟到|重复/)
   })
 
-  it('keeps drafts compact and folds tool arguments and results into final delivery', async () => {
+  it('keeps drafts compact without tool arguments or results', async () => {
     const { p, client, drain } = setup()
     start(p)
     p.stream({ type: 'chunk', attemptId: 'a', revision: 2, index: 0, time: 100000,
@@ -304,11 +344,13 @@ describe('TelegramProgress', () => {
     expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain('正在准备工具调用')
     p.event({ type: 'tool/call', time: 100000, data: { callId: 't', name: 'bash<script>', arguments: 'secret' } } as SessionEvent)
     await vi.advanceTimersByTimeAsync(1200)
-    expect(client.sendRichMessageDraft.mock.calls.at(-1)?.[2]).toContain('正在执行工具')
     p.event({ type: 'tool/result', time: 102000, data: { message: { toolCallId: 't', isError: true, content: [{ type: 'text', text: 'secret result' }] } } } as SessionEvent)
+    await vi.advanceTimersByTimeAsync(1200)
+    const drafts = client.sendRichMessageDraft.mock.calls.map(call => String(call[2])).join('\n')
+    expect(drafts).toContain('正在执行工具')
+    expect(drafts).not.toMatch(/secret|bash/)
     const final = p.finalMessage('完成')!
     expect(final).toContain('<details>')
-    expect(final).not.toContain('工具调用 · secret result')
     expect(final).not.toContain('secret result')
   })
 
@@ -376,6 +418,18 @@ describe('TelegramProgress', () => {
     expect(client.sendRichMessageDraft).toHaveBeenCalledTimes(2)
   })
 
+  it('resumes in a fresh draft after a user question', async () => {
+    const { p, client, drain } = setup()
+    start(p)
+    chunk(p, '提问前', 2)
+    await drain()
+    const before = client.sendRichMessageDraft.mock.calls.at(-1)!
+    p.suspend()
+    p.resume()
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(client.sendRichMessageDraft.mock.calls.at(-1)![1]).not.toBe(before[1])
+  })
+
   it('caps previews without downgrading or truncating long final answers', async () => {
     const { p, client, drain } = setup()
     start(p)
@@ -394,7 +448,7 @@ describe('TelegramProgress', () => {
     await drain()
     const preview = String(client.sendRichMessageDraft.mock.calls.at(-1)?.[2])
     expect(preview).not.toContain('<details>')
-    expect(preview).toContain('折叠内容将在任务结束后显示')
+    expect(preview).toContain('折叠内容将在生成完成后显示')
     expect(preview).not.toMatch(/read|⏳|✅|已完成/)
     const complete = '<details><summary>摘要</summary>\n\n正文\n\n</details>'
     expect(p.finalMessage(complete)!).toContain(complete)

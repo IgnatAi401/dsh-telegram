@@ -1452,7 +1452,8 @@ export class TelegramBridge {
       request.signal?.addEventListener('abort', pending.onAbort, { once: true })
       this.pendingQuestions.set(chat.chatId, pending)
       chat.progress?.suspend()
-      void this.presentQuestion(pending).catch((error: unknown) => {
+      // Queued after intermediate messages, so the question appears below them.
+      void chat.queue.then(() => this.presentQuestion(pending)).catch((error: unknown) => {
         const aborted = request.signal?.aborted === true || this.stopped
         this.rejectPendingQuestion(pending, userQuestionError(
           aborted ? 'ask_user_question was aborted before the Telegram user answered'
@@ -1748,7 +1749,8 @@ export class TelegramBridge {
       this.startTyping(chat)
       chat.progress = new TelegramProgress(this.client, chat.chatId, this.abortController.signal,
         task => this.enqueue(chat, task),
-        error => this.ctx.logger.warn('[telegram] preview failed: %s', messageOf(error)))
+        error => this.ctx.logger.warn('[telegram] preview failed: %s', messageOf(error)),
+        messageId => chat.transientMessageIds.add(messageId))
     } else if (event.type === 'turn/end') {
       const progress = chat.progress
       chat.progress = undefined
