@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TelegramBridge } from '../src/bridge.ts'
@@ -265,7 +265,7 @@ describe('TelegramBridge lifecycle', () => {
     expect(h.ctx.on.mock.calls.map(call => call[0])).toEqual([
       'session/event', 'agent/assistant-stream', 'user-questions/request', 'approval/request',
     ])
-    expect(h.ctx.systemPrompt.context).toHaveBeenCalledWith(expect.objectContaining({ name: 'telegram:channel' }))
+    expect(h.ctx.systemPrompt.context).toHaveBeenCalledWith(expect.objectContaining({ name: 'telegram:channel', required: true, interpolate: false }))
     await waitFor(() => h.client.setMyCommands.mock.calls.length > 0, 'command registration')
     expect(h.client.setMyCommands.mock.calls[0]![0].map((command: { command: string }) => command.command)).not.toContain('clear')
     await h.bridge.stop()
@@ -419,6 +419,8 @@ describe('TelegramBridge input', () => {
     expect(readdirSync(join(h.workspace.path, 'telegram-downloads'))).toEqual(['b-5-telegram-photo-5.png'])
     const content = agent.followup.mock.calls[0]![0].content
     expect(content.map((block: { type: string }) => block.type)).toEqual(['text', 'image', 'text'])
+    // Absolute, so the path stays valid after the Session's working directory moves.
+    expect(content[0].text).toBe(`[Telegram 图片已保存到工作区：${join(realpathSync(h.workspace.path), 'telegram-downloads', 'b-5-telegram-photo-5.png')}]`)
     expect(content[1].attachment).toEqual({ attachmentId: 'img-0' })
   })
 

@@ -4,7 +4,7 @@
 
 DeepSeek Harness 的 Telegram 机器人插件，主要用于 Linux / WSL2，也支持桌面版。在 Telegram 私聊中与 Agent 对话、发送图片和文件，并与 Web UI 共享工作区和会话。
 
-基于 **DeepSeek Harness v0.2.0-rc.2** 开发，通过 DSH 自带的 `dsh plugin` 安装。
+基于 **DeepSeek Harness v0.2.1-rc.1** 开发，通过 DSH 自带的 `dsh plugin` 安装。
 
 ## 安装
 

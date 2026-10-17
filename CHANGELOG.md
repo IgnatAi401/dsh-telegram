@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Target DeepSeek Harness 0.2.1-rc.1: DSH peers and development dependencies move to 0.2.1-rc.1 (cordis 4.0.5, schemastery 3.18.5). DSH 0.2.0-rc.2 now refuses to load the plugin; upgrade DSH first.
+- Mark the Telegram channel prompt as required, literal runtime context, so its output rules remain when a deployment disables optional runtime context.
+- Report saved Telegram images by absolute path, since a DSH 0.2.1 Session's working directory can move away from the workspace root.
+
 ## 0.3.0
 
 - Target DeepSeek Harness 0.2.0-rc.2. Install and remove through `dsh plugin --profile <name> add|remove`; the installer cleans up 0.2.x copy installations and no longer creates a dedicated `telegram` profile.

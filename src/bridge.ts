@@ -88,7 +88,8 @@ interface DownloadedWorkspaceImage {
   readonly data: Uint8Array
   readonly mediaType: ImageMediaType
   readonly name: string
-  readonly relativePath: string
+  /** Absolute path; a Session's working directory may differ from the workspace root. */
+  readonly path: string
 }
 
 /** Pre-admission content accumulated by `/collect` or built from one message. */
@@ -520,9 +521,13 @@ export class TelegramBridge {
         const chat = this.boundChat(request.agent)
         return chat === undefined ? next() : this.approveThroughTelegram(chat, request)
       }, { prepend: true }),
+      // Required: the channel's output rules still apply when a deployment turns off optional
+      // runtime context. Literal: the format guide is not a `{{variable}}` template.
       ctx.systemPrompt.context({
         name: 'telegram:channel',
         order: 900,
+        required: true,
+        interpolate: false,
         text: ({ agent }) => agent !== undefined && this.boundChat(agent) !== undefined ? TELEGRAM_CHANNEL_PROMPT : '',
       }),
     )
@@ -1261,7 +1266,7 @@ export class TelegramBridge {
     const candidate = this.imageCandidate(message)
     if (candidate !== undefined) {
       const image = await this.downloadWorkspaceImage(active, candidate)
-      return [{ type: 'text', text: `${imageLabel}${image.relativePath}]` }, { type: 'image', image }]
+      return [{ type: 'text', text: `${imageLabel}${image.path}]` }, { type: 'image', image }]
     }
     const document = message.document
     if (document === undefined) return []
@@ -1315,8 +1320,8 @@ export class TelegramBridge {
     }
     const name = `${safeFileStem(candidate.suggestedName)}${IMAGE_EXTENSIONS[mediaType]}`
     await this.ctx.attachments.validateImage({ data, mediaType, name })
-    const relativePath = await this.saveWorkspaceFile(active.workspace, candidate, name, data)
-    return { data, mediaType, name, relativePath }
+    const path = await this.saveWorkspaceFile(active.workspace, candidate, name, data)
+    return { data, mediaType, name, path }
   }
 
   /** Create an exclusive file under `<workspace>/telegram-downloads` without following an escaping directory link. */
@@ -1344,7 +1349,7 @@ export class TelegramBridge {
       }
       try { await file.writeFile(data) }
       finally { await file.close() }
-      return relative(workspaceRoot, absolutePath)
+      return absolutePath
     }
     throw new Error('无法为 Telegram 下载生成不冲突的文件名')
   }

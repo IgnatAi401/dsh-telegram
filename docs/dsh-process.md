@@ -1,6 +1,6 @@
 # dsh 过程折叠到 Telegram 的映射
 
-对照版本：DeepSeek Harness `0.2.0-rc.2`。实现位于 `src/transcript.ts`，由 `TelegramProgress` 维护每轮记录。
+对照版本：DeepSeek Harness `0.2.1-rc.1`。实现位于 `src/transcript.ts`，由 `TelegramProgress` 维护每轮记录。
 
 过程记录与最终正文合成一条 Rich Markdown 消息：外层 `<details>` 在前，最终正文在后。`/resend` 重发同一份完整内容。
 
