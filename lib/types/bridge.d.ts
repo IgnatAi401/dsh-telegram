@@ -168,6 +168,13 @@ export declare class TelegramBridge {
     private handleSessionEvent;
     /** Cache, then send the complete turn; a failure leaves the cache for `/resend`. */
     private deliverResult;
+    /**
+     * Upload every `[[send: …]]` path that resolves inside the chat's workspace.
+     * Paths are re-resolved through `realpath`, so a symlink cannot widen the upload
+     * beyond the workspace the model was told about.
+     * @returns Markdown notices for the paths that were not sent.
+     */
+    private sendWorkspaceFiles;
     /** Serialize per-chat Telegram side effects; they never interleave. */
     private enqueue;
     /** Delete messages in Bot API batches. */

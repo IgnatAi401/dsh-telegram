@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TelegramBridge } from '../src/bridge.ts'
@@ -103,6 +103,11 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
     answerCallbackQuery: vi.fn(async () => true),
     deleteMessages: vi.fn(async () => true),
     downloadFile: vi.fn(async (fileId: string) => ({ file: { file_id: fileId, file_unique_id: `u-${fileId}` }, data: PNG })),
+    sendDocument: vi.fn(async (chatId: number, file: { name: string }) => {
+      const messageId = nextMessageId++
+      sent.push({ messageId, chatId, text: `[document] ${file.name}` })
+      return message(chatId, messageId)
+    }),
   } satisfies TelegramClientLike
   const models = {
     default: { provider: 'deepseek', model: 'flash' },
@@ -635,5 +640,35 @@ describe('TelegramBridge questions and approvals', () => {
     await waitFor(() => h.sent.filter(entry => entry.text.includes('工具：')).length === 2, 'second approval')
     await h.click('拒绝')
     await expect(rejected).resolves.toBe('rejected')
+  })
+})
+
+describe('TelegramBridge file delivery', () => {
+  it('uploads a workspace file named by a send directive and strips the directive', async () => {
+    const h = createHarness()
+    await h.newSession()
+    const root = realpathSync(h.ctx.workspaceRegistry.list()[0]!.path)
+    const target = join(root, 'report.txt')
+    writeFileSync(target, 'hello')
+    completeTurn(h, 'session-1', `结果如下\n\n[[send: ${target}]]`)
+    await waitFor(() => h.client.sendDocument.mock.calls.length > 0, 'document upload')
+    expect(h.client.sendDocument).toHaveBeenCalledWith(7, expect.objectContaining({ name: 'report.txt' }), expect.anything())
+    await waitFor(() => h.sent.some(entry => entry.text.includes('结果如下')), 'text delivery')
+    // The directive is a control line, never visible chat content.
+    expect(h.sent.map(entry => entry.text).join('\n')).not.toContain('[[send:')
+  })
+
+  it('refuses a send directive that resolves outside the workspace', async () => {
+    const h = createHarness()
+    await h.newSession()
+    const outside = join(tmpdir(), `outside-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`)
+    writeFileSync(outside, 'secret')
+    try {
+      completeTurn(h, 'session-1', `看这个\n\n[[send: ${outside}]]`)
+      await waitFor(() => h.sent.some(entry => entry.text.includes('不在当前工作区内')), 'refusal notice')
+      expect(h.client.sendDocument).not.toHaveBeenCalled()
+    } finally {
+      rmSync(outside, { force: true })
+    }
   })
 })
