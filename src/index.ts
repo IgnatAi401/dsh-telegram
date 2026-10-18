@@ -19,13 +19,15 @@ export const name = 'telegram'
 export const inject = ['agents', 'attachments', 'llm', 'sessionController', 'systemPrompt', 'workspaceRegistry']
 
 /** Telegram bridge deployment config. */
-export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers'> {
+export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers' | 'sendFileRoots'> {
   /** Bot token; empty falls back to the `DSH_TELEGRAM_TOKEN` env var. */
   token?: string
   /** Allowed Telegram user ids; empty falls back to `DSH_TELEGRAM_ALLOWED_USER_IDS`. */
   allowedUserIds?: number[]
   /** Allow any Telegram user (development only); unset falls back to `DSH_TELEGRAM_ALLOW_ALL_USERS`. */
   allowAllUsers?: boolean
+  /** Extra roots a `[[send: …]]` reply may upload from; the workspace is always allowed. */
+  sendFileRoots?: string[]
 }
 
 export const Config: Schema<TelegramConfig> = Schema.object({
@@ -36,6 +38,7 @@ export const Config: Schema<TelegramConfig> = Schema.object({
   pollingTimeoutSec: Schema.natural().min(1).default(30),
   apiBaseUrl: Schema.string().pattern(/^https?:\/\//),
   resultCacheDirectory: Schema.string().min(1),
+  sendFileRoots: Schema.array(Schema.string().min(1)).default([]),
 })
 
 const ALLOWED_USER_IDS_ENV = 'DSH_TELEGRAM_ALLOWED_USER_IDS'

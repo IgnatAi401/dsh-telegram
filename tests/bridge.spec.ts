@@ -665,10 +665,21 @@ describe('TelegramBridge file delivery', () => {
     writeFileSync(outside, 'secret')
     try {
       completeTurn(h, 'session-1', `看这个\n\n[[send: ${outside}]]`)
-      await waitFor(() => h.sent.some(entry => entry.text.includes('不在当前工作区内')), 'refusal notice')
+      await waitFor(() => h.sent.some(entry => entry.text.includes('不在允许的目录内')), 'refusal notice')
       expect(h.client.sendDocument).not.toHaveBeenCalled()
     } finally {
       rmSync(outside, { force: true })
     }
+  })
+
+  it('accepts a file from a configured extra root', async () => {
+    const extraRoot = tempDir('telegram-extra-')
+    const h = createHarness({ sendFileRoots: [extraRoot] })
+    await h.newSession()
+    const target = join(realpathSync(extraRoot), 'notes.txt')
+    writeFileSync(target, 'hello')
+    completeTurn(h, 'session-1', `给你\n\n[[send: ${target}]]`)
+    await waitFor(() => h.client.sendDocument.mock.calls.length > 0, 'document upload')
+    expect(h.client.sendDocument).toHaveBeenCalledWith(7, expect.objectContaining({ name: 'notes.txt' }), expect.anything())
   })
 })

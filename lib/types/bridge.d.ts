@@ -23,6 +23,13 @@ export interface TelegramBridgeOptions {
     apiBaseUrl?: string;
     /** Result cache root; defaults to DSH_HOME/telegram-results. */
     resultCacheDirectory?: string;
+    /**
+     * Extra roots a `[[send: …]]` reply may upload from. The current workspace is
+     * always allowed; every entry here widens what a model-chosen path can read, so
+     * keep it to directories the human deliberately shares (for example `~/Desktop`).
+     * A leading `~` expands to the home directory.
+     */
+    sendFileRoots?: readonly string[];
     /** Client seam; tests substitute a fake. */
     client?: TelegramClientLike;
     /** Delay seam; tests substitute an instant sleep. */
@@ -42,6 +49,8 @@ export declare class TelegramBridge {
     private readonly preset;
     private readonly sleep;
     private readonly resultCache;
+    /** Raw extra upload roots; resolved against the filesystem on each delivery. */
+    private readonly sendFileRoots;
     private readonly chats;
     private readonly chatsBySession;
     private readonly collections;

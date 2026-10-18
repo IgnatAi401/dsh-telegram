@@ -24,6 +24,7 @@ import type {
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, extname, isAbsolute, join, relative } from 'node:path'
 import { TelegramClient } from './client.js'
 import type {
@@ -57,6 +58,13 @@ export interface TelegramBridgeOptions {
   apiBaseUrl?: string
   /** Result cache root; defaults to DSH_HOME/telegram-results. */
   resultCacheDirectory?: string
+  /**
+   * Extra roots a `[[send: …]]` reply may upload from. The current workspace is
+   * always allowed; every entry here widens what a model-chosen path can read, so
+   * keep it to directories the human deliberately shares (for example `~/Desktop`).
+   * A leading `~` expands to the home directory.
+   */
+  sendFileRoots?: readonly string[]
   /** Client seam; tests substitute a fake. */
   client?: TelegramClientLike
   /** Delay seam; tests substitute an instant sleep. */
@@ -290,7 +298,7 @@ const TELEGRAM_CHANNEL_PROMPT = [
   "- 图片、视频、音频、语音、动画和文件可用独立一段的 ![说明](https://可访问的真实媒体地址 \"标题\")，Telegram 按地址及 MIME 类型识别媒体；只提供文字链接时用 [说明](地址)。不要把本地路径当成公开 URL；不要编造媒体地址。",
   "- 显式媒体标签支持 <img>、<video>、<audio>、<tg-document>，用 <figure><figcaption> 和 <cite> 加标题和来源，tg-spoiler 可隐藏媒体。拼图用 <tg-collage>，轮播用 <tg-slideshow>。媒体必须是独立块。",
   "- 复用已上传媒体的 tg://photo?id=、tg://video?id=、tg://audio?id=、tg://document?id= 需要真实媒体映射，当前没有映射工具，不要杜撰这些 ID。草稿不能新上传文件；媒体可能要等最终消息才显示。",
-  "- 要把工作区里的文件真正发给用户，在最终回复里单独一行写 [[send: 工作区内的绝对路径]]，每行一个。插件会把它作为附件上传并从正文中移除。文件必须位于当前工作区内，单个不超过 50 MiB；不要用它发送公开媒体地址，也不要虚构路径。",
+  "- 要把工作区里的文件真正发给用户，在最终回复里单独一行写 [[send: 绝对路径]]，每行一个。插件会把它作为附件上传并从正文中移除。路径必须在当前工作区内，或位于用户显式开放的额外目录内；单个文件不超过 50 MiB。不要用它发送公开媒体地址，也不要虚构路径。",
   "- 地图使用 <tg-map lat=\"纬度\" long=\"经度\" zoom=\"缩放级别\"/>，只填有依据的坐标。自定义表情用 <tg-emoji emoji-id=\"真实ID\">替代文字</tg-emoji>，日期时间用 <tg-time unix=\"真实Unix秒数\" format=\"wDT\">替代文字</tg-time>，也支持官方 tg://emoji 与 tg://time 语法。",
   "- 原生按钮用 <tg-button>，按钮行用 <tg-button-row align=\"left|center|right\">。可使用 type=\"url\" 搭配 url、type=\"copy_text\" 搭配 text，或 type=\"disabled\"；样式为 primary、success、danger、link。不要用按钮代替普通正文链接。",
   "- callback_data、web_app、login_url、switch_inline_query、switch_inline_query_current_chat、switch_inline_query_chosen_chat 按钮语法会原样传给 Telegram，但需要真实应用、域名或后端处理。当前插件只处理自己的菜单和提问按钮；不要生成自定义业务回调或承诺点击能执行工具。需要用户回答时使用已有 ask_user_question 工具。",
@@ -433,6 +441,17 @@ function pathInside(root: string, candidate: string): boolean {
 }
 
 /**
+ * Expand a leading `~` so a configured upload root reads the way a shell would.
+ * @param root - a configured root, absolute or home-relative.
+ * @returns the same path with `~` replaced by the home directory.
+ */
+function expandHome(root: string): string {
+  if (root === '~') return homedir()
+  if (root.startsWith('~/') || root.startsWith('~\\')) return join(homedir(), root.slice(2))
+  return root
+}
+
+/**
  * Split `[[send: path]]` directive lines out of a reply.
  * The lines never reach Telegram; the remaining text keeps its own line breaks.
  * @param markdown - the complete reply the model produced.
@@ -489,6 +508,8 @@ export class TelegramBridge {
   private readonly preset: string | undefined
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
   private readonly resultCache: TelegramResultCache
+  /** Raw extra upload roots; resolved against the filesystem on each delivery. */
+  private readonly sendFileRoots: readonly string[]
   private readonly chats = new Map<number, ChatState>()
   private readonly chatsBySession = new Map<string, ActiveChatSession>()
   private readonly collections = new Map<number, TelegramCollection>()
@@ -526,6 +547,7 @@ export class TelegramBridge {
     this.allowAllUsers = options.allowAllUsers ?? false
     this.preset = options.preset?.trim() || undefined
     this.resultCache = new TelegramResultCache(options.token, options.resultCacheDirectory)
+    this.sendFileRoots = (options.sendFileRoots ?? []).map(root => root.trim()).filter(root => root !== '')
     this.sleep = options.sleep ?? ((ms, signal) => new Promise((resolve) => {
       const timer = setTimeout(resolve, ms)
       signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
@@ -1837,14 +1859,23 @@ export class TelegramBridge {
       this.ctx.logger.warn('[telegram] workspace realpath failed: %s', messageOf(error))
       return ['⚠️ **文件未发送**：无法解析当前工作区。']
     }
+    // The workspace is always allowed; configured roots are additive and may be missing.
+    const allowedRoots = [workspaceRoot]
+    for (const root of this.sendFileRoots) {
+      try {
+        allowedRoots.push(await realpath(expandHome(root)))
+      } catch (error) {
+        this.ctx.logger.warn('[telegram] sendFileRoots entry unusable: %s', messageOf(error))
+      }
+    }
     const notices: string[] = []
     for (const requested of paths) {
       try {
         const target = await realpath(requested)
-        // Confine uploads to the workspace: a model-chosen absolute path must never
+        // Confine uploads to the allowed roots: a model-chosen absolute path must never
         // become an arbitrary read of the user's home directory.
-        if (!pathInside(workspaceRoot, target)) {
-          notices.push(`⚠️ **未发送**：\`${richLiteral(requested)}\` 不在当前工作区内。`)
+        if (!allowedRoots.some(root => pathInside(root, target))) {
+          notices.push(`⚠️ **未发送**：\`${richLiteral(requested)}\` 不在允许的目录内。`)
           continue
         }
         const info = await stat(target)
