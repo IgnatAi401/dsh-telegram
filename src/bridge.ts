@@ -1016,15 +1016,19 @@ export class TelegramBridge {
     const archived = new Set(this.ctx.workspaceRegistry.archivedSessionIds)
     return this.ctx.workspaceRegistry.list().map(workspace => ({
       workspace,
-      sessions: workspace.sessionIds.map((id) => {
-        const summary = summaries.get(id)
-        return {
-          id,
-          title: displayTitle(summary?.projections?.values.title),
-          archived: archived.has(id),
-          running: summary?.running === true,
-        }
-      }),
+      // A never-used session has no title and would only show a raw id, so skip it
+      // (DSH flags these sessions as blank in the session-list metadata projection).
+      sessions: workspace.sessionIds
+        .filter(id => summaries.get(id)?.projections?.values.sessionListMetadata?.blank !== true)
+        .map((id) => {
+          const summary = summaries.get(id)
+          return {
+            id,
+            title: displayTitle(summary?.projections?.values.title),
+            archived: archived.has(id),
+            running: summary?.running === true,
+          }
+        }),
     }))
   }
 
