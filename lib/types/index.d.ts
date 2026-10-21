@@ -14,13 +14,15 @@ export * from './client.js';
 export declare const name = "telegram";
 export declare const inject: string[];
 /** Telegram bridge deployment config. */
-export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers'> {
+export interface TelegramConfig extends Omit<TelegramBridgeOptions, 'token' | 'allowedUserIds' | 'allowAllUsers' | 'sendFileRoots'> {
     /** Bot token; empty falls back to the `DSH_TELEGRAM_TOKEN` env var. */
     token?: string;
     /** Allowed Telegram user ids; empty falls back to `DSH_TELEGRAM_ALLOWED_USER_IDS`. */
     allowedUserIds?: number[];
     /** Allow any Telegram user (development only); unset falls back to `DSH_TELEGRAM_ALLOW_ALL_USERS`. */
     allowAllUsers?: boolean;
+    /** Extra roots a `[[send: …]]` reply may upload from; the workspace is always allowed. */
+    sendFileRoots?: string[];
 }
 export declare const Config: Schema<TelegramConfig>;
 /**
