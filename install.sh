@@ -128,7 +128,14 @@ if [ -n "$ROOT" ] && [ -f "$ROOT/lib/index.js" ]; then
 else
   SPEC="$REMOTE_SPEC"
 fi
-"${DSH[@]}" plugin --profile "$PROFILE" add "$SPEC"
+# pnpm keeps the commit a git spec resolved to in the lockfile, so re-adding the same
+# spec reports "Already up to date"; `update` re-resolves it to the branch tip.
+if [ "$SPEC" = "$REMOTE_SPEC" ] && [ -f "$PROFILE_DIR/package.json" ] \
+  && grep -qE "\"$PACKAGE\"[[:space:]]*:[[:space:]]*\"$REMOTE_SPEC\"" "$PROFILE_DIR/package.json"; then
+  "${DSH[@]}" plugin --profile "$PROFILE" update "$PACKAGE"
+else
+  "${DSH[@]}" plugin --profile "$PROFILE" add "$SPEC"
+fi
 if [ "$PROFILE" = desktop ]; then
   START='reopen DeepSeek Harness Desktop'
 else
