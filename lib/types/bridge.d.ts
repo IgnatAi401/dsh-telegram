@@ -48,6 +48,10 @@ export declare class TelegramBridge {
     /** Human-input requests keyed by Telegram chat id; at most one per chat. */
     private readonly pendingQuestions;
     private readonly menus;
+    /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
+    private readonly compacting;
+    /** Work started off the polling loop; `stop` waits for it. */
+    private readonly backgroundTasks;
     private readonly abortController;
     private readonly disposers;
     private offset;
@@ -76,13 +80,28 @@ export declare class TelegramBridge {
     private handleCommand;
     /** Native Stop: cancel the running turn and any question it is waiting on. */
     private stopCurrentTask;
+    /** Report the figures the Web composer shows for the current session. */
+    private sendStats;
+    /** Check `/compact` preconditions, then summarize off the polling loop: the summary is a model call. */
+    private startCompaction;
+    /**
+     * Manual compaction through `ctx.compaction`, the service behind the Web `/compact`
+     * command. A refreshed rich draft shows progress; the result follows as one message
+     * with the summary folded.
+     */
+    private runCompaction;
+    /** Best-effort context occupancy after a compaction. */
+    private contextOccupancyOf;
     /** Bind callbacks to the state shown, so an old button cannot act on a newer selection. */
     private menuFingerprint;
     private handleMenuCallback;
     /** Render one menu page; callbacks capture stable ids, never live catalog positions. */
     private showMenu;
     private findModel;
-    /** Workspaces in registry order with their sessions' list metadata. */
+    /**
+     * Workspaces in registry order with their sessions' list metadata. Like the Web sidebar,
+     * a blank session (no turn yet) is listed only while it is this chat's current session.
+     */
     private loadCatalog;
     /** Read one session's model route (falling back to the DSH default) and title. */
     private sessionStatus;
@@ -166,10 +185,23 @@ export declare class TelegramBridge {
     /** Question/answer messages are removed with the turn, unless the question outlives it. */
     private trackQuestionMessage;
     private handleSessionEvent;
-    /** Cache, then send the complete turn; a failure leaves the cache for `/resend`. */
+    /**
+     * Cache, then send the complete turn; a failure leaves the cache for `/resend`.
+     * `markdown` is the plain text, with placeholders for local media. `embedded`
+     * carries the text with `tg://` links and its uploads; if Telegram refuses it,
+     * the plain text is sent and the caller sends the files separately.
+     */
     private deliverResult;
-    /** Upload the turn's presented files after its result; skipped or failed files share one notice. */
-    private deliverFiles;
+    /**
+     * Local images the result places in its text, resolved against the Session cwd.
+     * Returns the text with `tg://` links, the plain text with placeholders, and the
+     * checked files; unusable sources become placeholders in both and notice lines.
+     */
+    private inlineMedia;
+    /** Keep presented files that Telegram can accept; the others become notice lines. */
+    private checkFiles;
+    /** Upload files as separate documents; skipped or failed files share one notice. */
+    private sendDocuments;
     /** Serialize per-chat Telegram side effects; they never interleave. */
     private enqueue;
     /** Delete messages in Bot API batches. */

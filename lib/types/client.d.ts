@@ -92,11 +92,22 @@ export interface TelegramUpdate {
         readonly message_thread_id?: number;
     };
 }
+/** One local file uploaded with a rich message and referenced by a `tg://<type>?id=<id>` link. */
+export interface TelegramRichMedia {
+    /** 1-64 characters from A-Z, a-z, 0-9, `_` and `-`; also the multipart field name. */
+    readonly id: string;
+    /** Bot API InputMedia type; animations are linked as `tg://video`. */
+    readonly type: 'photo' | 'video' | 'animation' | 'audio' | 'document';
+    readonly file: Blob;
+    readonly fileName: string;
+}
 /** Runtime seam surface tests substitute with a fake. */
 export interface TelegramClientLike {
     /** Native Rich Markdown (including official HTML extensions); drafts expire after 30 seconds. */
     sendRichMessageDraft(chatId: number, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
     sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
+    /** Upload media together with the rich message that embeds them through `tg://<type>?id=` links. */
+    sendRichMessageWithMedia(chatId: number, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
     /** Replace rich content and its inline keyboard in a single request. */
     editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
     /** Long-poll for updates at or after `offset`. */
@@ -179,6 +190,12 @@ export declare class TelegramClient implements TelegramClientLike {
     sendChatAction(chatId: number, action: string, signal?: AbortSignal): Promise<boolean>;
     sendRichMessageDraft(chatId: number, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
     sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
+    /**
+     * Multipart `sendRichMessage`: each file is posted under its id and named in
+     * `rich_message.media` as `attach://<id>`. Telegram refuses the whole message
+     * beyond 50 media, 50 MB in total, or with an empty file.
+     */
+    sendRichMessageWithMedia(chatId: number, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
     editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
     /**
      * Register the bot's slash-command list; Telegram shows it in the `/` menu.

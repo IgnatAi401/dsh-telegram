@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TelegramBridge } from '../src/bridge.ts'
 import type { TelegramBridgeOptions } from '../src/bridge.ts'
-import type { TelegramClientLike, TelegramMessage, TelegramReplyMarkup, TelegramUpdate } from '../src/client.ts'
+import type { TelegramClientLike, TelegramMessage, TelegramReplyMarkup, TelegramRichMedia, TelegramUpdate } from '../src/client.ts'
 
 type Mock = ReturnType<typeof vi.fn>
 type Listener = (...args: never[]) => unknown
@@ -28,9 +28,11 @@ interface Sent {
 
 interface HarnessSetup {
   /** Existing sessions in the single workspace. */
-  sessions?: Array<{ id: string; title?: string; archived?: boolean }>
+  sessions?: Array<{ id: string; title?: string; archived?: boolean; blank?: boolean }>
   /** Whether the current model accepts images. */
   imageInput?: boolean
+  /** Whether the DSH assembly composes `ctx.compaction`. */
+  compaction?: boolean
 }
 
 const temporary: string[] = []
@@ -58,6 +60,7 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
   const workspacePath = tempDir('telegram-workspace-')
   const sessionIds: string[] = []
   const archived: string[] = []
+  const blanks = new Set<string>()
   let promptSpec: { name: string; text: (context: { agent?: FakeAgent }) => string } | undefined
   let nextMessageId = 1
   let nextSession = 1
@@ -74,6 +77,7 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
     sessionIds.push(session.id)
     if (session.title !== undefined) titles.set(session.id, session.title)
     if (session.archived) archived.push(session.id)
+    if (session.blank) blanks.add(session.id)
   }
   const workspace = {
     id: 'ws-1',
@@ -103,6 +107,11 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
     answerCallbackQuery: vi.fn(async () => true),
     deleteMessages: vi.fn(async () => true),
     downloadFile: vi.fn(async (fileId: string) => ({ file: { file_id: fileId, file_unique_id: `u-${fileId}` }, data: PNG })),
+    sendRichMessageWithMedia: vi.fn(async (chatId: number, text: string, _media: readonly TelegramRichMedia[]) => {
+      const messageId = nextMessageId++
+      sent.push({ messageId, chatId, text })
+      return message(chatId, messageId)
+    }),
     sendDocument: vi.fn(async (chatId: number, _document: Blob, fileName: string, caption?: string) => {
       const messageId = nextMessageId++
       sent.push({ messageId, chatId, text: `[document ${fileName}]${caption === undefined ? '' : ` ${caption}`}` })
@@ -123,6 +132,8 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
     }],
   }
   const userQuestions = { answer: vi.fn(() => true) }
+  const compaction = { compactNow: vi.fn(async (_agent: unknown, _signal: AbortSignal): Promise<unknown> => null) }
+  const projectionExtras = new Map<string, Record<string, unknown>>()
   const ctx = {
     on: vi.fn((event: string, listener: Listener, opts?: { prepend?: boolean }) => {
       const list = listeners.get(event) ?? []
@@ -131,7 +142,8 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
       listeners.set(event, list)
       return () => { list.splice(list.indexOf(listener), 1); return true }
     }),
-    get: vi.fn((name: string) => name === 'userQuestions' ? userQuestions : undefined),
+    get: vi.fn((name: string) => name === 'userQuestions' ? userQuestions
+      : name === 'compaction' && setup.compaction !== false ? compaction : undefined),
     logger: { warn: vi.fn(), error: vi.fn() },
     agents: { get: vi.fn((id: string) => agents.get(id)) },
     systemPrompt: {
@@ -163,7 +175,7 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
         ? { agent: agentFor(id) } : { error: new Error(`session "${id}" not found`) }),
       list: vi.fn(async () => ({
         items: sessionIds.map(id => ({
-          sessionId: id, running: agents.get(id)?.status === 'running',
+          sessionId: id, running: agents.get(id)?.status === 'running', blank: blanks.has(id),
           projections: { kind: 'cached', asOfSeq: 0, values: titles.has(id) ? { title: titles.get(id) } : {} },
         })),
       })),
@@ -172,6 +184,7 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
         values: {
           ...(titles.has(sessionId) ? { title: titles.get(sessionId) } : {}),
           modelSelection: { lastUsed: null, next: selections.get(sessionId) ?? null },
+          ...projectionExtras.get(sessionId),
         },
       })),
       modelCatalog: vi.fn(async () => models),
@@ -199,7 +212,8 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
   bridge.start()
 
   const harness = {
-    bridge, client, ctx, sent, agents, workspace, workspacePath, userQuestions, selections, archived,
+    bridge, client, ctx, sent, agents, workspace, workspacePath, userQuestions, selections, archived, blanks,
+    compaction, projectionExtras,
     prompt: (agent: FakeAgent | undefined) => promptSpec?.text({ ...(agent === undefined ? {} : { agent }) }),
     /** Deliver one update through the same entry point as polling. */
     async dispatch(update: Partial<TelegramUpdate>): Promise<void> {
@@ -334,6 +348,26 @@ describe('TelegramBridge sessions and menu', () => {
         message: { message_id: panel.messageId, chat: { id: 8, type: 'private' }, date: 0 } } })
     }
     expect(h.lastText()).toContain('该会话正在被另一个 Telegram 私聊使用')
+  })
+
+  it('lists a blank session only while it is the current one', async () => {
+    const h = createHarness({}, { sessions: [{ id: 'ghost', blank: true }, { id: 'used', title: '已用' }] })
+    await h.text('/menu')
+    await h.click('工作区与会话')
+    expect(h.lastText()).toContain('1 个会话')
+    await h.click('demo')
+    expect(h.lastText()).toContain('已用')
+    expect(h.lastText()).not.toContain('ghost')
+    await h.click('在此工作区新建会话')
+    h.blanks.add('session-1')
+    await h.click('工作区与会话')
+    await h.click('demo')
+    expect(h.lastText()).toContain('<code>session-1</code> · 当前')
+    await h.text('/new')
+    await h.text('/menu')
+    await h.click('工作区与会话')
+    await h.click('demo')
+    expect(h.lastText()).not.toContain('session-1')
   })
 
   it('archives the current session and unarchives it when reopened', async () => {
@@ -552,8 +586,12 @@ describe('TelegramBridge turn delivery', () => {
 describe('TelegramBridge file delivery', () => {
   const present = (h: ReturnType<typeof createHarness>, sessionId: string, files: Array<{ path: string; description?: string }>, cwd?: string) =>
     h.emit(sessionId, { type: 'deliverables/presented', data: { turn: 1, callId: 'c', files } } as unknown as Partial<SessionEvent>, cwd)
+  const answer = (h: ReturnType<typeof createHarness>, sessionId: string, text: string) =>
+    h.emit(sessionId, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text }] } } } as Partial<SessionEvent>)
+  const embeddedNames = (h: ReturnType<typeof createHarness>) =>
+    (h.client.sendRichMessageWithMedia.mock.calls[0]![2] as readonly TelegramRichMedia[]).map(document => [document.id, document.fileName])
 
-  it('uploads presented files after the final result, resolving paths against the Session cwd', async () => {
+  it('embeds presented files in the final result, resolving paths against the Session cwd', async () => {
     const h = createHarness()
     const agent = await h.newSession()
     const id = agent.session.id
@@ -561,17 +599,70 @@ describe('TelegramBridge file delivery', () => {
     writeFileSync(join(h.workspacePath, 'out', 'report.docx'), 'docx')
     writeFileSync(join(h.workspacePath, 'chart.png'), PNG)
     h.emit(id, { type: 'turn/start', data: { turn: 1 } })
-    present(h, id, [{ path: 'report.docx', description: '  季度报告  ' }], join(h.workspacePath, 'out'))
-    present(h, id, [{ path: join(h.workspacePath, 'chart.png') }, { path: join(h.workspacePath, 'out', 'report.docx'), description: '最终版' }])
-    h.emit(id, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '已生成' }] } } } as Partial<SessionEvent>)
+    present(h, id, [{ path: 'report.docx', description: '  季度 <报告>  ' }], join(h.workspacePath, 'out'))
+    present(h, id, [{ path: join(h.workspacePath, 'chart.png') }, { path: join(h.workspacePath, 'out', 'report.docx'), description: '最终 <版>' }])
+    answer(h, id, '已生成')
     h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
-    await waitFor(() => h.client.sendDocument.mock.calls.length === 2, 'documents')
-    // The same file presented twice is sent once, with its latest description.
-    expect(h.sent.slice(-3).map(entry => entry.text)).toEqual(['已生成', '[document chart.png]', '[document report.docx] 最终版'])
-    expect(await (h.client.sendDocument.mock.calls[0]![1] as Blob).arrayBuffer()).toEqual(PNG.buffer)
+    await waitFor(() => h.client.sendRichMessageWithMedia.mock.calls.length === 1, 'embedded result')
+    // The same file presented twice is embedded once, with its latest description.
+    expect(h.lastText()).toBe([
+      '已生成',
+      '<tg-document src="tg://document?id=file1"></tg-document>',
+      '<figure><tg-document src="tg://document?id=file2"></tg-document><figcaption>最终 &lt;版&gt;</figcaption></figure>',
+    ].join('\n\n'))
+    expect(embeddedNames(h)).toEqual([['file1', 'chart.png'], ['file2', 'report.docx']])
+    const documents = h.client.sendRichMessageWithMedia.mock.calls[0]![2] as readonly TelegramRichMedia[]
+    expect(await documents[0]!.file.arrayBuffer()).toEqual(PNG.buffer)
+    expect(h.client.sendDocument).not.toHaveBeenCalled()
+    // `/resend` repeats only the text and never uploads again.
+    await h.text('/resend')
+    expect(h.lastText()).toBe('已生成')
     completeTurn(h, id, '下一轮')
     await waitFor(() => h.lastText() === '下一轮', 'next turn')
-    expect(h.client.sendDocument).toHaveBeenCalledTimes(2)
+    expect(h.client.sendRichMessageWithMedia).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends the text alone and the files separately when Telegram refuses the embedded upload', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    writeFileSync(join(h.workspacePath, 'a.txt'), 'a')
+    h.client.sendRichMessageWithMedia.mockRejectedValueOnce(new Error('media blocks support only HTTP URLs'))
+    h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, agent.session.id, [{ path: 'a.txt', description: '说明' }])
+    answer(h, agent.session.id, '完成')
+    h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await waitFor(() => h.client.sendDocument.mock.calls.length === 1, 'separate document')
+    expect(h.sent.slice(-2).map(entry => entry.text)).toEqual(['完成', '[document a.txt] 说明'])
+    expect(h.ctx.logger.warn).toHaveBeenCalledWith(expect.stringContaining('sending them separately'), 'media blocks support only HTTP URLs')
+  })
+
+  it.each([
+    ['50 files totalling exactly 50 MB', 50, [20 * 1024 * 1024, 30 * 1024 * 1024 - 48], true],
+    ['51 files', 51, [], false],
+    ['more than 50 MB in total', 2, [30 * 1024 * 1024, 20 * 1024 * 1024 + 1], false],
+  ] as const)('embeds all files or none: %s', async (_name, count, sizes, embedded) => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    const names = Array.from({ length: count }, (_value, index) => `f${index + 1}.bin`)
+    names.forEach((name, index) => {
+      writeFileSync(join(h.workspacePath, name), '1')
+      if (sizes[index] !== undefined) truncateSync(join(h.workspacePath, name), sizes[index])
+    })
+    h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, agent.session.id, names.map(path => ({ path })))
+    answer(h, agent.session.id, '完成')
+    h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    if (embedded) {
+      await waitFor(() => h.client.sendRichMessageWithMedia.mock.calls.length === 1, 'embedded result')
+      await settle()
+      expect(embeddedNames(h).map(([, name]) => name)).toEqual(names)
+      expect(h.client.sendDocument).not.toHaveBeenCalled()
+    } else {
+      await waitFor(() => h.client.sendDocument.mock.calls.length === count, 'separate documents')
+      expect(h.client.sendRichMessageWithMedia).not.toHaveBeenCalled()
+      expect(h.sent.find(entry => entry.text === '完成')).toBeDefined()
+      expect(h.client.sendDocument.mock.calls.map(call => call[2])).toEqual(names)
+    }
   })
 
   it('reports missing, empty and oversized files instead of uploading them', async () => {
@@ -584,10 +675,11 @@ describe('TelegramBridge file delivery', () => {
     writeFileSync(join(h.workspacePath, 'ok.txt'), 'ok')
     h.emit(id, { type: 'turn/start', data: { turn: 1 } })
     present(h, id, [{ path: 'missing.txt' }, { path: 'empty.txt' }, { path: 'big.zip' }, { path: 'ok.txt' }])
+    answer(h, id, '完成')
     h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     const notice = await waitFor(() => h.sent.find(entry => entry.text.includes('部分文件未发送'))?.text, 'notice')
-    expect(h.client.sendDocument.mock.calls.map(call => call[2])).toEqual(['ok.txt'])
-    expect(notice).toContain('missing.txt</code>：发送失败')
+    expect(embeddedNames(h)).toEqual([['file1', 'ok.txt']])
+    expect(notice).toContain('missing.txt</code>：无法读取')
     expect(notice).toContain('empty.txt</code>：文件为空')
     expect(notice).toContain('big.zip</code>：50.0 MB，超过 Telegram 单文件 50 MB 上限')
   })
@@ -600,9 +692,63 @@ describe('TelegramBridge file delivery', () => {
     h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
     present(h, agent.session.id, [{ path: 'a.txt' }])
     h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as Partial<SessionEvent>)
-    await waitFor(() => h.client.sendDocument.mock.calls.length === 1, 'document')
+    await waitFor(() => h.client.sendRichMessageWithMedia.mock.calls.length === 1, 'embedded notice')
     await settle()
-    expect(h.client.sendDocument).toHaveBeenCalledTimes(1)
+    expect(h.lastText()).toContain('任务已中断')
+    expect(embeddedNames(h)).toEqual([['file1', 'a.txt']])
+    expect(h.client.sendDocument).not.toHaveBeenCalled()
+  })
+
+  it('embeds local images placed in the answer at their position, ahead of presented files that do not fit', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    const id = agent.session.id
+    writeFileSync(join(h.workspacePath, 'cat.png'), PNG)
+    writeFileSync(join(h.workspacePath, 'clip one.mp4'), 'mp4')
+    const names = Array.from({ length: 50 }, (_value, index) => `d${index + 1}.txt`)
+    for (const name of names) writeFileSync(join(h.workspacePath, name), name)
+    h.emit(id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, id, names.map(path => ({ path })))
+    answer(h, id, ['看这张：', '', '![猫](./cat.png "我的猫")', '', '![](<clip one.mp4>)', '', '`![](./cat.png)` 是写法', '', '```md', '![](./cat.png)', '```'].join('\n'))
+    h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    // 2 inline media + 50 presented files exceed 50 media: inline media keep priority, deliverables go separately.
+    await waitFor(() => h.client.sendDocument.mock.calls.length === 50, 'separate deliverables')
+    const [, text, media] = h.client.sendRichMessageWithMedia.mock.calls[0]! as [number, string, readonly TelegramRichMedia[]]
+    expect(text).toBe(['看这张：', '', '![猫](tg://photo?id=media1 "我的猫")', '', '![](tg://video?id=media2)', '', '`![](./cat.png)` 是写法', '', '```md', '![](./cat.png)', '```'].join('\n'))
+    expect(media.map(item => [item.id, item.type, item.fileName])).toEqual([['media1', 'photo', 'cat.png'], ['media2', 'video', 'clip one.mp4']])
+    // `/resend` repeats the text with placeholders and uploads nothing.
+    await h.text('/resend')
+    expect(h.lastText()).toContain('📎 猫')
+    expect(h.lastText()).toContain('📎 clip one.mp4')
+  })
+
+  it('falls back to placeholders and separate files for inline media, and reports missing ones', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    writeFileSync(join(h.workspacePath, 'cat.png'), PNG)
+    h.client.sendRichMessageWithMedia.mockRejectedValueOnce(new Error('bad media'))
+    h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
+    answer(h, agent.session.id, '![猫](cat.png)\n\n![狗](dog.png)')
+    h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const notice = await waitFor(() => h.sent.find(entry => entry.text.includes('部分文件未发送'))?.text, 'notice')
+    expect(h.client.sendRichMessageWithMedia.mock.calls[0]![1]).toBe('![猫](tg://photo?id=media1)\n\n📎 狗')
+    expect(h.sent.map(entry => entry.text)).toContain('📎 猫\n\n📎 狗')
+    expect(h.client.sendDocument.mock.calls.map(call => [call[2], call[3]])).toEqual([['cat.png', '猫']])
+    expect(notice).toContain('dog.png</code>：无法读取')
+  })
+
+  it('shows local images as placeholders in intermediate messages and drafts', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    const id = agent.session.id
+    h.emit(id, { type: 'turn/start', data: { turn: 1 } })
+    h.emit(id, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '先看 ![图](./a.png)' }, { type: 'tool-call', id: 't' }] } } } as Partial<SessionEvent>)
+    await waitFor(() => h.sent.find(entry => entry.text === '先看 📎 图'), 'intermediate placeholder')
+    const stream = h.ctx.on.mock.calls.find(call => call[0] === 'agent/assistant-stream')![1] as (payload: unknown) => void
+    stream({ agent: { session: { id } }, frame: { type: 'start', attemptId: 'a', revision: 10, turn: 1, step: 2 } })
+    stream({ agent: { session: { id } }, frame: { type: 'chunk', attemptId: 'a', revision: 11, index: 0, time: 0, chunk: { type: 'text-delta', index: 0, text: '![视频](/tmp/v.mp4)' } } })
+    await waitFor(() => h.client.sendRichMessageDraft.mock.calls.some(call => String(call[2]).includes('📎 视频')), 'draft placeholder')
+    expect(h.client.sendRichMessageDraft.mock.calls.some(call => String(call[2]).includes('/tmp/v.mp4'))).toBe(false)
   })
 
   it('tells the Agent to use present and about the 50 MB limit', async () => {
@@ -705,5 +851,94 @@ describe('TelegramBridge questions and approvals', () => {
     await waitFor(() => h.sent.filter(entry => entry.text.includes('工具：')).length === 2, 'second approval')
     await h.click('拒绝')
     await expect(rejected).resolves.toBe('rejected')
+  })
+})
+
+describe('TelegramBridge statistics and compaction', () => {
+  it('reports session statistics from DSH projections', async () => {
+    const h = createHarness()
+    await h.text('/stats')
+    expect(h.lastText()).toContain('尚未选择会话')
+    const agent = await h.newSession()
+    await h.text('/stats')
+    expect(h.lastText()).toContain('暂无统计数据')
+    h.projectionExtras.set(agent.session.id, {
+      sessionStats: { turns: 1, steps: 1, llmMs: 800, toolMs: 0, ttftMs: 400, ttftSteps: 1, decodeMs: 425, decodeTokens: 63 },
+      tokenUsage: { uncachedInputTokens: 3981, cacheReadTokens: 8320, cacheWriteTokens: 0, outputTokens: 63 },
+      contextPressure: { pressureTokens: 12_300, projectedTokens: 12_364, contextWindow: 1_000_000 },
+      contextBreakdown: { systemTokens: 1400, toolsTokens: 7100, messageTokens: 2500 },
+    })
+    await h.text('/stats')
+    const text = h.lastText()
+    expect(text).toContain('1 轮 1 步')
+    expect(text).toContain('| 首 token 平均（TTFT） | 0.4秒 |')
+    expect(text).toContain('| 输出速度（TPS） | 148 tok/s |')
+    expect(text).toContain('Token 用量 · 12,364 tok')
+    expect(text).toContain('| 缓存命中 | 68% |')
+    expect(text).toContain('上下文已用 1%')
+    expect(text).toContain('| 工具定义 | 约 7.1K |')
+    expect(text).not.toContain('工具调用用时')
+  })
+
+  it('previews compaction in a draft and folds the summary into the result', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    let finish!: (value: unknown) => void
+    h.compaction.compactNow.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await h.text('/compact')
+    await waitFor(() => h.compaction.compactNow.mock.calls.length > 0, 'compaction start')
+    expect(h.compaction.compactNow.mock.calls[0]![0]).toBe(agent)
+    await waitFor(() => h.client.sendRichMessageDraft.mock.calls.length > 0, 'compaction draft')
+    expect(h.client.sendRichMessageDraft.mock.calls[0]![2]).toContain('<tg-thinking>正在压缩上下文 · 0 秒</tg-thinking>')
+    await h.text('/compact')
+    expect(h.lastText()).toContain('请等待本次压缩完成')
+    h.projectionExtras.set(agent.session.id, { contextPressure: { pressureTokens: 50_000, projectedTokens: 20_000, contextWindow: 1_000_000 } })
+    finish({
+      shadowedSeqs: [1, 2, 3], shadowedTokenCount: 30_000,
+      summary: [{ type: 'text', text: '<compacted-summary>## Primary Request and Intent\n- 修复 bug\n```ts\nconst x = 1' }],
+    })
+    const done = await waitFor(() => h.sent.find(entry => entry.text.includes('上下文压缩完成')), 'compaction result')
+    expect(done.text).toContain('已将 3 条历史压缩为一条摘要，约释放 30,000 tokens')
+    expect(done.text).toContain('2%（约 20K / 1M）')
+    expect(done.text).toContain('<details><summary>压缩摘要</summary>\n\n## Primary Request and Intent\n- 修复 bug')
+    expect(done.text).not.toContain('compacted-summary')
+    expect(done.text).toMatch(/const x = 1\n```\n\n<\/details>$/)
+  })
+
+  it('cancels compaction from the draft stop button', async () => {
+    const h = createHarness()
+    await h.newSession()
+    h.compaction.compactNow.mockImplementationOnce((_agent: unknown, signal: AbortSignal) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    }))
+    await h.text('/compact')
+    await waitFor(() => h.compaction.compactNow.mock.calls.length > 0, 'compaction start')
+    await h.dispatch({ stopped_message_generation: { chat: { id: 7, type: 'private' } } } as Partial<TelegramUpdate>)
+    await waitFor(() => h.sent.find(entry => entry.text.includes('已取消上下文压缩')), 'cancel notice')
+    expect(h.sent.some(entry => entry.text.includes('当前没有正在执行的任务'))).toBe(false)
+  })
+
+  it('explains compaction refusals and failures', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    agent.status = 'running'
+    await h.text('/compact')
+    expect(h.lastText()).toContain('任务仍在运行')
+    expect(h.compaction.compactNow).not.toHaveBeenCalled()
+    agent.status = 'idle'
+    await h.text('/compact')
+    await waitFor(() => h.sent.find(entry => entry.text.includes('暂无可压缩的历史')), 'no-op result')
+    await settle()
+    h.compaction.compactNow.mockRejectedValueOnce(Object.assign(new Error('agent busy'), { name: 'ManualCompactionError', code: 'busy' }))
+    await h.text('/compact')
+    const failed = await waitFor(() => h.sent.find(entry => entry.text.includes('上下文压缩失败')), 'failure result')
+    expect(failed.text).toContain('会话正忙')
+  })
+
+  it('reports a DSH assembly without compaction', async () => {
+    const h = createHarness({}, { compaction: false })
+    await h.newSession()
+    await h.text('/compact')
+    expect(h.lastText()).toContain('未启用上下文压缩')
   })
 })

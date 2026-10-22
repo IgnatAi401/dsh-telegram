@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Send files the Agent declares with DSH's `present` tool as Telegram documents after the turn's result. Files that are missing, empty or over the Bot API 50 MB upload limit are listed in one notice instead; the channel prompt tells the Agent about `present` and the 50 MB limit.
+- Read the bot settings from `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS` and `TELEGRAM_ALLOW_ALL_USERS`: DeepSeek Harness 0.2.1-rc.2 refuses to start when `~/.dsh/.env` sets any `DSH_`-prefixed name. Rename the entries in `.env`; the old `DSH_TELEGRAM_*` names are still read when exported in the environment.
+- Deliver files the Agent declares with DSH's `present` tool: when they number at most 50 and total at most 50 MB, all of them are embedded in the turn's result as `<tg-document>` blocks uploaded through `rich_message.media` (Bot API 10.3); otherwise, or when Telegram still refuses the embedded upload, all of them follow as separate documents. Files that are missing, empty or over the Bot API 50 MB upload limit are listed in one notice instead; the channel prompt tells the Agent when to use `present`, when to place media in the answer, and the 50 MB limit.
+- Add `/stats`, which reports the session figures the DSH Web composer shows (turns and steps, model and tool time, TTFT, output speed, token usage with cache hits, and context occupancy with its composition), and `/compact`, which compacts the current idle session through DSH's compaction service: a rich draft shows progress (its Stop button cancels), and the result reports the history and tokens freed with the summary in a collapsed `<details>` block.
+- Embed local images, videos and audio the Agent places in its final answer as `![说明](本地路径)`: they upload as photos, videos, animations or audio at their position and take priority over presented files when not everything fits in one message. Drafts and intermediate messages show them as placeholders.
 
 ## 0.3.1
 

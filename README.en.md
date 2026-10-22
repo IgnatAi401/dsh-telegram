@@ -35,8 +35,8 @@ You can also add `github:IgnatAi401/dsh-telegram` on the app's Plugins page. For
 Create a bot through @BotFather on Telegram, then add to `~/.dsh/.env` (`%USERPROFILE%\.dsh\.env` on Windows):
 
 ```
-DSH_TELEGRAM_TOKEN=<your BotFather token>
-DSH_TELEGRAM_ALLOWED_USER_IDS=<your numeric Telegram user ID>
+TELEGRAM_BOT_TOKEN=<your BotFather token>
+TELEGRAM_ALLOWED_USER_IDS=<your numeric Telegram user ID>
 ```
 
 Separate multiple user IDs with commas. Only private chats and allowed users are supported.

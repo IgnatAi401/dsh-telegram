@@ -90,13 +90,13 @@ describe('dsh-telegram plugin apply', () => {
   })
 
   it('fails loudly at load when the token is missing', async () => {
-    await withEnv({ DSH_TELEGRAM_TOKEN: '' }, async () => {
+    await withEnv({ TELEGRAM_BOT_TOKEN: '', DSH_TELEGRAM_TOKEN: '' }, async () => {
       await expect(contextWithServices().ctx.plugin(telegram, {})).rejects.toThrow('missing bot token')
     })
   })
 
-  it('falls back to the DSH_TELEGRAM_TOKEN environment variable', async () => {
-    await withEnv({ DSH_TELEGRAM_TOKEN: 'env-token' }, async () => {
+  it('falls back to the TELEGRAM_BOT_TOKEN environment variable', async () => {
+    await withEnv({ TELEGRAM_BOT_TOKEN: 'env-token' }, async () => {
       const client = fakeClient()
       const { ctx } = contextWithServices()
       await ctx.plugin(telegram, { client, sleep })
@@ -105,20 +105,34 @@ describe('dsh-telegram plugin apply', () => {
     })
   })
 
-  it('reads the allowlist from DSH_TELEGRAM_ALLOWED_USER_IDS and rejects malformed values', async () => {
-    await withEnv({ DSH_TELEGRAM_ALLOWED_USER_IDS: '111, 222' }, async () => {
+  it('still accepts the legacy DSH_TELEGRAM_TOKEN when exported', async () => {
+    await withEnv({ TELEGRAM_BOT_TOKEN: '', DSH_TELEGRAM_TOKEN: 'legacy-token' }, async () => {
+      const client = fakeClient()
+      const { ctx } = contextWithServices()
+      await ctx.plugin(telegram, { client, sleep })
+      await waitFor(() => client.polls > 0 ? true : undefined, 'first poll')
+      await ctx.fiber.dispose()
+    })
+  })
+
+  it('reads the allowlist from TELEGRAM_ALLOWED_USER_IDS and rejects malformed values', async () => {
+    await withEnv({ TELEGRAM_ALLOWED_USER_IDS: '111, 222' }, async () => {
       const { ctx } = contextWithServices()
       await ctx.plugin(telegram, { token: 'test-token', client: fakeClient(), sleep })
       await ctx.fiber.dispose()
     })
-    await withEnv({ DSH_TELEGRAM_ALLOWED_USER_IDS: '111,not-a-user' }, async () => {
+    await withEnv({ TELEGRAM_ALLOWED_USER_IDS: '111,not-a-user' }, async () => {
       await expect(contextWithServices().ctx.plugin(telegram, { token: 'test-token', client: fakeClient() }))
-        .rejects.toThrow('comma-separated positive integer')
+        .rejects.toThrow('TELEGRAM_ALLOWED_USER_IDS must contain comma-separated positive integer')
+    })
+    await withEnv({ TELEGRAM_ALLOWED_USER_IDS: '', DSH_TELEGRAM_ALLOWED_USER_IDS: 'bad' }, async () => {
+      await expect(contextWithServices().ctx.plugin(telegram, { token: 'test-token', client: fakeClient() }))
+        .rejects.toThrow('DSH_TELEGRAM_ALLOWED_USER_IDS must contain')
     })
   })
 
   it('lets explicit allowAllUsers false bypass the environment fallback', async () => {
-    await withEnv({ DSH_TELEGRAM_ALLOW_ALL_USERS: 'not-a-boolean' }, async () => {
+    await withEnv({ TELEGRAM_ALLOW_ALL_USERS: 'not-a-boolean' }, async () => {
       const { ctx } = contextWithServices()
       await ctx.plugin(telegram, { token: 'test-token', allowAllUsers: false, client: fakeClient(), sleep })
       await ctx.fiber.dispose()

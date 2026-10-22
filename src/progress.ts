@@ -4,6 +4,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TelegramApiError } from './client.js'
 import type { TelegramClientLike } from './client.js'
 import { escapeHtml } from './format.js'
+import { withLocalMediaPlaceholders } from './media.js'
 import { richBody, TelegramTranscript } from './transcript.js'
 
 const LONG_PREVIEW = '回复较长，完整内容将在生成完成后显示。'
@@ -147,7 +148,7 @@ export class TelegramProgress {
     this.newDraft()
     void this.enqueue(async () => {
       try {
-        this.track((await this.client.sendRichMessage(this.chatId, richBody(text), this.stopSignal)).message_id)
+        this.track((await this.client.sendRichMessage(this.chatId, withLocalMediaPlaceholders(richBody(text)), this.stopSignal)).message_id)
       } catch (error) {
         if (!this.stopSignal.aborted) this.warn(error)
       }
@@ -259,7 +260,7 @@ export class TelegramProgress {
     // Leave them to committed delivery, where the complete source is available.
     const current = this.text || this.previewOverflow ? previewText(this.text, this.previewOverflow)
       : previewText(this.answer, this.answer.length > 16000)
-    return current.trim() ? richBody(current) : ''
+    return current.trim() ? withLocalMediaPlaceholders(richBody(current)) : ''
   }
 
   private async send(): Promise<void> {

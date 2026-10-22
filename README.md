@@ -35,8 +35,8 @@ dsh plugin --profile desktop add github:IgnatAi401/dsh-telegram
 通过 Telegram 的 @BotFather 创建机器人，然后在 `~/.dsh/.env`（Windows 为 `%USERPROFILE%\.dsh\.env`）中写入：
 
 ```
-DSH_TELEGRAM_TOKEN=<BotFather 提供的 token>
-DSH_TELEGRAM_ALLOWED_USER_IDS=<你的 Telegram 数字用户 ID>
+TELEGRAM_BOT_TOKEN=<BotFather 提供的 token>
+TELEGRAM_ALLOWED_USER_IDS=<你的 Telegram 数字用户 ID>
 ```
 
 多个用户 ID 用逗号分隔。仅支持私聊，只有允许的用户可以访问。

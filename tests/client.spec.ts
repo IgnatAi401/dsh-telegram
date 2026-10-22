@@ -250,6 +250,28 @@ describe('TelegramClient', () => {
     expect((fetchImpl.mock.calls[1]![1]?.body as FormData).has('caption')).toBe(false)
   })
 
+  it('uploads embedded rich-message media as attach:// files of their own type', async () => {
+    const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { message_id: 6, chat: { id: 7, type: 'private' }, date: 0 } }))
+    const client = new TelegramClient('t:ok', { fetch: fetchImpl })
+    const markdown = '![图](tg://photo?id=media1)\n\n<tg-document src="tg://document?id=file1"></tg-document>'
+    await client.sendRichMessageWithMedia(7, markdown, [
+      { id: 'media1', type: 'photo', file: new Blob(['p']), fileName: 'p.png' },
+      { id: 'file1', type: 'document', file: new Blob(['a']), fileName: 'a.txt' },
+    ])
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url).split('/').at(-1)).toBe('sendRichMessage')
+    const form = init?.body as FormData
+    expect(form.get('chat_id')).toBe('7')
+    expect(JSON.parse(form.get('rich_message') as string)).toEqual({
+      markdown, media: [
+        { id: 'media1', media: { type: 'photo', media: 'attach://media1' } },
+        { id: 'file1', media: { type: 'document', media: 'attach://file1' } },
+      ],
+    })
+    expect((form.get('media1') as File).name).toBe('p.png')
+    expect((form.get('file1') as File).name).toBe('a.txt')
+  })
+
   it('gives uploads their own deadline', async () => {
     vi.useFakeTimers()
     try {

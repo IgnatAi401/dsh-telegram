@@ -137,7 +137,7 @@ fi
 cat <<EOF
 
 installed $PACKAGE into profile $PROFILE. Put the bot settings in $DSH_HOME/.env:
-  DSH_TELEGRAM_TOKEN=<bot token>
-  DSH_TELEGRAM_ALLOWED_USER_IDS=<your numeric Telegram user id>
+  TELEGRAM_BOT_TOKEN=<bot token>
+  TELEGRAM_ALLOWED_USER_IDS=<your numeric Telegram user id>
 then $START.
 EOF
