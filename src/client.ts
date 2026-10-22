@@ -1,6 +1,6 @@
 /**
  * Minimal Telegram Bot API client over `fetch`: long polling, native Rich
- * Markdown messages and drafts, inline keyboards, and file downloads. The
+ * Markdown messages and drafts, inline keyboards, file uploads and downloads. The
  * token is embedded in the request URL, so every error path redacts it.
  * @module telegram/client
  */
@@ -131,6 +131,8 @@ export interface TelegramClientLike {
   answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>
   /** Delete up to 100 messages from one chat in a single request. */
   deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>
+  /** Upload one file as a document; Telegram keeps the original bytes (images are not recompressed). */
+  sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>
   /** Resolve and download one Telegram-hosted file under an explicit byte cap. */
   downloadFile(fileId: string, maxBytes: number, signal?: AbortSignal): Promise<TelegramDownloadedFile>
 }
@@ -145,6 +147,8 @@ export interface TelegramClientOptions {
   pollingTimeoutSec?: number
   /** Deadline for a complete API response, including its JSON body. Defaults to 15 seconds. */
   requestTimeoutMs?: number
+  /** Deadline for a `sendDocument` upload. Defaults to 5 minutes. */
+  uploadTimeoutMs?: number
 }
 
 interface TelegramApiResponse<T> {
@@ -185,6 +189,7 @@ export class TelegramClient implements TelegramClientLike {
   /** Long-polling timeout in seconds; controls each getUpdates call. */
   readonly pollingTimeoutSec: number
   private readonly requestTimeoutMs: number
+  private readonly uploadTimeoutMs: number
 
   /**
    * @param token - bot token from @BotFather.
@@ -205,6 +210,10 @@ export class TelegramClient implements TelegramClientLike {
     if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs < 1) {
       throw new RangeError('telegram client: requestTimeoutMs must be a positive integer')
     }
+    this.uploadTimeoutMs = options.uploadTimeoutMs ?? 300000
+    if (!Number.isSafeInteger(this.uploadTimeoutMs) || this.uploadTimeoutMs < 1) {
+      throw new RangeError('telegram client: uploadTimeoutMs must be a positive integer')
+    }
   }
 
   private url(method: string): string {
@@ -216,21 +225,26 @@ export class TelegramClient implements TelegramClientLike {
     return `${this.baseUrl}/file/bot${this.token}/${filePath.replace(/^\/+/, '')}`
   }
 
-  /** POST `method` with `body`; throws on transport failure or a non-ok response. */
-  private async call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal, retries = 0): Promise<T> {
+  /** POST `method` with a JSON or multipart `body`; throws on transport failure or a non-ok response. */
+  private async call<T>(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal, retries = 0): Promise<T> {
     let response: Response
     let payload: TelegramApiResponse<T> | null
     try {
+      const multipart = body instanceof FormData
       const timeout = method === 'getUpdates'
         ? this.pollingTimeoutSec * 1000 + this.requestTimeoutMs
-        : method.endsWith('Draft') ? Math.min(5000, this.requestTimeoutMs) : this.requestTimeoutMs
+        : multipart ? this.uploadTimeoutMs
+          : method.endsWith('Draft') ? Math.min(5000, this.requestTimeoutMs) : this.requestTimeoutMs
       const result = await this.requestWithin(timeout, signal, async requestSignal => {
-        const response = await this.fetchImpl(this.url(method), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: requestSignal,
-        })
+        // fetch derives the multipart boundary header from FormData itself.
+        const response = await this.fetchImpl(this.url(method), multipart
+          ? { method: 'POST', body, signal: requestSignal }
+          : {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: requestSignal,
+            })
         let payload: TelegramApiResponse<T> | null
         try {
           payload = await response.json() as TelegramApiResponse<T>
@@ -383,6 +397,19 @@ export class TelegramClient implements TelegramClientLike {
       chat_id: chatId,
       message_ids: [...messageIds],
     }, signal)
+  }
+
+  /**
+   * Upload a file through multipart `sendDocument`. The public Bot API accepts
+   * at most 50 MB per file; callers check the size before reading the file.
+   * @param caption - plain-text caption; Telegram allows 1024 characters.
+   */
+  sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage> {
+    const form = new FormData()
+    form.set('chat_id', String(chatId))
+    form.set('document', document, fileName)
+    if (caption !== undefined && caption !== '') form.set('caption', caption)
+    return this.call<TelegramMessage>('sendDocument', form, signal)
   }
 
   /**

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Send files the Agent declares with DSH's `present` tool as Telegram documents after the turn's result. Files that are missing, empty or over the Bot API 50 MB upload limit are listed in one notice instead; the channel prompt tells the Agent about `present` and the 50 MB limit.
+
 ## 0.3.1
 
 - Target DeepSeek Harness 0.2.1-rc.1: DSH peers and development dependencies move to 0.2.1-rc.1 (cordis 4.0.5, schemastery 3.18.5). DSH 0.2.0-rc.2 now refuses to load the plugin; upgrade DSH first.

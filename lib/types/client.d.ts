@@ -1,6 +1,6 @@
 /**
  * Minimal Telegram Bot API client over `fetch`: long polling, native Rich
- * Markdown messages and drafts, inline keyboards, and file downloads. The
+ * Markdown messages and drafts, inline keyboards, file uploads and downloads. The
  * token is embedded in the request URL, so every error path redacts it.
  * @module telegram/client
  */
@@ -114,6 +114,8 @@ export interface TelegramClientLike {
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
     /** Delete up to 100 messages from one chat in a single request. */
     deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
+    /** Upload one file as a document; Telegram keeps the original bytes (images are not recompressed). */
+    sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Resolve and download one Telegram-hosted file under an explicit byte cap. */
     downloadFile(fileId: string, maxBytes: number, signal?: AbortSignal): Promise<TelegramDownloadedFile>;
 }
@@ -127,6 +129,8 @@ export interface TelegramClientOptions {
     pollingTimeoutSec?: number;
     /** Deadline for a complete API response, including its JSON body. Defaults to 15 seconds. */
     requestTimeoutMs?: number;
+    /** Deadline for a `sendDocument` upload. Defaults to 5 minutes. */
+    uploadTimeoutMs?: number;
 }
 /** Structured API failure; tokens are redacted before constructing this error. */
 export declare class TelegramApiError extends Error {
@@ -145,6 +149,7 @@ export declare class TelegramClient implements TelegramClientLike {
     /** Long-polling timeout in seconds; controls each getUpdates call. */
     readonly pollingTimeoutSec: number;
     private readonly requestTimeoutMs;
+    private readonly uploadTimeoutMs;
     /**
      * @param token - bot token from @BotFather.
      * @param options - client options.
@@ -153,7 +158,7 @@ export declare class TelegramClient implements TelegramClientLike {
     private url;
     /** Build a token-bearing download URL; callers must redact every failure path. */
     private fileUrl;
-    /** POST `method` with `body`; throws on transport failure or a non-ok response. */
+    /** POST `method` with a JSON or multipart `body`; throws on transport failure or a non-ok response. */
     private call;
     /** A stalled fetch/body must never hold the chat's delivery queue indefinitely. */
     private requestWithin;
@@ -187,6 +192,12 @@ export declare class TelegramClient implements TelegramClientLike {
     editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
     deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
+    /**
+     * Upload a file through multipart `sendDocument`. The public Bot API accepts
+     * at most 50 MB per file; callers check the size before reading the file.
+     * @param caption - plain-text caption; Telegram allows 1024 characters.
+     */
+    sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
     /**
      * Resolve a Telegram `file_id` and download it without ever buffering more
      * than the caller-approved limit. The public Bot API currently imposes its

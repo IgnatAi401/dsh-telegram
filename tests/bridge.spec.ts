@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TelegramBridge } from '../src/bridge.ts'
@@ -103,6 +103,11 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
     answerCallbackQuery: vi.fn(async () => true),
     deleteMessages: vi.fn(async () => true),
     downloadFile: vi.fn(async (fileId: string) => ({ file: { file_id: fileId, file_unique_id: `u-${fileId}` }, data: PNG })),
+    sendDocument: vi.fn(async (chatId: number, _document: Blob, fileName: string, caption?: string) => {
+      const messageId = nextMessageId++
+      sent.push({ messageId, chatId, text: `[document ${fileName}]${caption === undefined ? '' : ` ${caption}`}` })
+      return message(chatId, messageId)
+    }),
   } satisfies TelegramClientLike
   const models = {
     default: { provider: 'deepseek', model: 'flash' },
@@ -194,7 +199,7 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
   bridge.start()
 
   const harness = {
-    bridge, client, ctx, sent, agents, workspace, userQuestions, selections, archived,
+    bridge, client, ctx, sent, agents, workspace, workspacePath, userQuestions, selections, archived,
     prompt: (agent: FakeAgent | undefined) => promptSpec?.text({ ...(agent === undefined ? {} : { agent }) }),
     /** Deliver one update through the same entry point as polling. */
     async dispatch(update: Partial<TelegramUpdate>): Promise<void> {
@@ -225,9 +230,10 @@ function createHarness(options: Partial<TelegramBridgeOptions> = {}, setup: Harn
       await harness.click('在此工作区新建会话')
       return agents.get(sessionIds[0]!)!
     },
-    emit(sessionId: string, event: Partial<SessionEvent>): void {
+    emit(sessionId: string, event: Partial<SessionEvent>, cwd = workspacePath): void {
       for (const listener of listeners.get('session/event') ?? []) {
-        (listener as (session: { id: string }, event: SessionEvent) => void)({ id: sessionId }, { seq: 0, time: 0, ...event } as SessionEvent)
+        (listener as (session: { id: string; header: { cwd: string } }, event: SessionEvent) => void)(
+          { id: sessionId, header: { cwd } }, { seq: 0, time: 0, ...event } as SessionEvent)
       }
     },
     /** Run one DSH waterfall event through the plugin's listener, falling back to `next`. */
@@ -540,6 +546,70 @@ describe('TelegramBridge turn delivery', () => {
     await settle()
     expect(h.sent.some(entry => entry.text.includes('已中断当前任务'))).toBe(true)
     expect(h.sent.some(entry => entry.text.includes('半截'))).toBe(false)
+  })
+})
+
+describe('TelegramBridge file delivery', () => {
+  const present = (h: ReturnType<typeof createHarness>, sessionId: string, files: Array<{ path: string; description?: string }>, cwd?: string) =>
+    h.emit(sessionId, { type: 'deliverables/presented', data: { turn: 1, callId: 'c', files } } as unknown as Partial<SessionEvent>, cwd)
+
+  it('uploads presented files after the final result, resolving paths against the Session cwd', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    const id = agent.session.id
+    mkdirSync(join(h.workspacePath, 'out'))
+    writeFileSync(join(h.workspacePath, 'out', 'report.docx'), 'docx')
+    writeFileSync(join(h.workspacePath, 'chart.png'), PNG)
+    h.emit(id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, id, [{ path: 'report.docx', description: '  季度报告  ' }], join(h.workspacePath, 'out'))
+    present(h, id, [{ path: join(h.workspacePath, 'chart.png') }, { path: join(h.workspacePath, 'out', 'report.docx'), description: '最终版' }])
+    h.emit(id, { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '已生成' }] } } } as Partial<SessionEvent>)
+    h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await waitFor(() => h.client.sendDocument.mock.calls.length === 2, 'documents')
+    // The same file presented twice is sent once, with its latest description.
+    expect(h.sent.slice(-3).map(entry => entry.text)).toEqual(['已生成', '[document chart.png]', '[document report.docx] 最终版'])
+    expect(await (h.client.sendDocument.mock.calls[0]![1] as Blob).arrayBuffer()).toEqual(PNG.buffer)
+    completeTurn(h, id, '下一轮')
+    await waitFor(() => h.lastText() === '下一轮', 'next turn')
+    expect(h.client.sendDocument).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports missing, empty and oversized files instead of uploading them', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    const id = agent.session.id
+    writeFileSync(join(h.workspacePath, 'empty.txt'), '')
+    writeFileSync(join(h.workspacePath, 'big.zip'), '')
+    truncateSync(join(h.workspacePath, 'big.zip'), 50 * 1024 * 1024 + 1)
+    writeFileSync(join(h.workspacePath, 'ok.txt'), 'ok')
+    h.emit(id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, id, [{ path: 'missing.txt' }, { path: 'empty.txt' }, { path: 'big.zip' }, { path: 'ok.txt' }])
+    h.emit(id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    const notice = await waitFor(() => h.sent.find(entry => entry.text.includes('部分文件未发送'))?.text, 'notice')
+    expect(h.client.sendDocument.mock.calls.map(call => call[2])).toEqual(['ok.txt'])
+    expect(notice).toContain('missing.txt</code>：发送失败')
+    expect(notice).toContain('empty.txt</code>：文件为空')
+    expect(notice).toContain('big.zip</code>：50.0 MB，超过 Telegram 单文件 50 MB 上限')
+  })
+
+  it('still sends presented files when the turn is stopped, and ignores unbound sessions', async () => {
+    const h = createHarness()
+    const agent = await h.newSession()
+    writeFileSync(join(h.workspacePath, 'a.txt'), 'a')
+    present(h, 'other', [{ path: 'a.txt' }])
+    h.emit(agent.session.id, { type: 'turn/start', data: { turn: 1 } })
+    present(h, agent.session.id, [{ path: 'a.txt' }])
+    h.emit(agent.session.id, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as Partial<SessionEvent>)
+    await waitFor(() => h.client.sendDocument.mock.calls.length === 1, 'document')
+    await settle()
+    expect(h.client.sendDocument).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells the Agent to use present and about the 50 MB limit', async () => {
+    const h = createHarness()
+    const prompt = h.prompt(await h.newSession())
+    expect(prompt).toContain('调用 present 工具')
+    expect(prompt).toContain('单个文件上传上限为 50 MB')
   })
 })
 

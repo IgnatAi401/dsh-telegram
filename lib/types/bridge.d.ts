@@ -168,6 +168,8 @@ export declare class TelegramBridge {
     private handleSessionEvent;
     /** Cache, then send the complete turn; a failure leaves the cache for `/resend`. */
     private deliverResult;
+    /** Upload the turn's presented files after its result; skipped or failed files share one notice. */
+    private deliverFiles;
     /** Serialize per-chat Telegram side effects; they never interleave. */
     private enqueue;
     /** Delete messages in Bot API batches. */

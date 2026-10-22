@@ -233,6 +233,36 @@ describe('TelegramClient', () => {
     expect(() => client.deleteMessages(7, Array.from({ length: 101 }, (_, index) => index + 1))).toThrow('1 to 100')
   })
 
+  it('uploads documents as multipart form data with an optional caption', async () => {
+    const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: { message_id: 5, chat: { id: 7, type: 'private' }, date: 0 } }))
+    const client = new TelegramClient('t:ok', { fetch: fetchImpl })
+    await expect(client.sendDocument(7, new Blob(['报告']), 'report.txt', '季度报告')).resolves.toMatchObject({ message_id: 5 })
+    await client.sendDocument(7, new Blob(['x']), 'plain.txt')
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toBe('https://api.telegram.org/bott:ok/sendDocument')
+    expect(init?.headers).toBeUndefined()
+    const form = init?.body as FormData
+    expect(form.get('chat_id')).toBe('7')
+    expect(form.get('caption')).toBe('季度报告')
+    const document = form.get('document') as File
+    expect(document.name).toBe('report.txt')
+    expect(await document.text()).toBe('报告')
+    expect((fetchImpl.mock.calls[1]![1]?.body as FormData).has('caption')).toBe(false)
+  })
+
+  it('gives uploads their own deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchImpl = fetchMock(() => new Promise<Response>(() => {}))
+      const client = new TelegramClient('t:ok', { fetch: fetchImpl, requestTimeoutMs: 100, uploadTimeoutMs: 1000 })
+      const result = client.sendDocument(7, new Blob(['x']), 'x.txt').catch(error => error)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(900)
+      expect(await result).toMatchObject({ message: expect.stringContaining('timed out after 1000ms') })
+    } finally { vi.useRealTimers() }
+  })
+
   it('resolves and downloads Telegram files under the requested byte cap', async () => {
     const bytes = Uint8Array.of(0x89, 0x50, 0x4e, 0x47)
     const fetchImpl = fetchMock(async () => jsonResponse({ ok: true, result: {} }))
