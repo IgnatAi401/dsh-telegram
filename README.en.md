@@ -4,7 +4,7 @@
 
 A Telegram bot plugin for DeepSeek Harness, for both the command-line version (Linux / WSL2 / macOS) and Desktop. Chat with agents and send images and files in private Telegram chats, sharing workspaces and sessions with the Web UI.
 
-Developed against **DeepSeek Harness v0.2.1-rc.1** and installed through DSH's own `dsh plugin` command.
+Developed against **DeepSeek Harness v0.2.1-rc.3** and installed through DSH's own `dsh plugin` command.
 
 ## Install
 
