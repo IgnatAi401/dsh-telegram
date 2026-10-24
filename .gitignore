@@ -11,3 +11,5 @@ telegram-downloads/
 coverage/
 *.log
 *.tsbuildinfo
+# macOS custom folder icon; the name ends in a carriage return, so the line needs two
+Icon

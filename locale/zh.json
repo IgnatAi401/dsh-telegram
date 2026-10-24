@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Telegram 机器人",
+    "description": "在 Telegram 私聊中与 DSH 的 Agent 对话，发送文字、图片和文件，并与 Web UI 共享工作区和会话。"
+  }
+}

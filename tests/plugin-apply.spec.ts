@@ -5,8 +5,8 @@ import type { TelegramClientLike } from '../src/client.ts'
 
 /**
  * Mount the real namespace plugin on a real Context with its injected DSH
- * services stubbed and a fake client seam. Covers mount/poll/dispose and the
- * environment fallbacks; message flow is covered by the bridge unit tests.
+ * services stubbed and a fake client seam. Covers mount/poll/dispose, live
+ * settings restarts and the environment fallbacks; message flow is covered by the bridge unit tests.
  */
 
 async function waitFor<T>(get: () => T | undefined, description: string): Promise<T> {
@@ -89,9 +89,49 @@ describe('dsh-telegram plugin apply', () => {
     expect(prompts).toEqual([])
   })
 
-  it('fails loudly at load when the token is missing', async () => {
+  it('leaves an unsaved token undefined, which the settings page reports as not configured', () => {
+    const config = telegram.Config({})
+    expect(config.token.get()).toBeUndefined()
+    expect(config.allowedUserIds.get()).toEqual([])
+  })
+
+  it('stays loaded and idle while no token is configured', async () => {
     await withEnv({ TELEGRAM_BOT_TOKEN: '', DSH_TELEGRAM_TOKEN: '' }, async () => {
-      await expect(contextWithServices().ctx.plugin(telegram, {})).rejects.toThrow('missing bot token')
+      const client = fakeClient()
+      const { ctx, prompts } = contextWithServices()
+      await ctx.plugin(telegram, { client, sleep })
+      await sleep(25)
+      expect(client.polls).toBe(0)
+      expect(prompts).toEqual([])
+      await ctx.fiber.dispose()
+    })
+  })
+
+  it('restarts with the token and allowlist a live settings update commits', async () => {
+    await withEnv({ TELEGRAM_BOT_TOKEN: '', DSH_TELEGRAM_TOKEN: '' }, async () => {
+      const first = fakeClient()
+      const settings = { token: '', ids: [] as number[] }
+      const tokens: string[] = []
+      const { ctx, prompts } = contextWithServices()
+      // Stand-ins for the volatile references Loader commits new values into.
+      const config = {
+        token: { get: () => settings.token },
+        allowedUserIds: { get: () => settings.ids },
+        sleep,
+        get client() { tokens.push(settings.token); return first },
+      }
+      await ctx.plugin({ name: 'host', apply: (inner: Context) => telegram.apply(inner, config as telegram.TelegramConfig) })
+      expect(first.polls).toBe(0)
+      settings.token = '1:live-token'
+      settings.ids = [42]
+      ctx.emit('loader/volatile-update', [['token'], ['allowedUserIds']])
+      await waitFor(() => first.polls > 0 ? true : undefined, 'poll after the token was saved')
+      expect(tokens).toEqual(['1:live-token'])
+      expect(prompts).toEqual(['telegram:channel'])
+      settings.token = ''
+      ctx.emit('loader/volatile-update', [['token']])
+      await waitFor(() => prompts.length === 0 ? true : undefined, 'stop after the token was cleared')
+      await ctx.fiber.dispose()
     })
   })
 
