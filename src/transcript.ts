@@ -50,6 +50,11 @@ export function richBody(text: string): string {
   return lines.join('\n')
 }
 
+/** Whether a `<details>` summary is the process fold that {@link TelegramTranscript.render} writes. */
+export function isProcessSummary(summary: string): boolean {
+  return /^\d+ 次工具调用 · \d+ 条消息$/.test(summary.trim())
+}
+
 /** Retain visible assistant messages and counts only, never reasoning or tool payloads. */
 export class TelegramTranscript {
   private readonly messages: { step: number, text: string, hasTools: boolean }[] = []

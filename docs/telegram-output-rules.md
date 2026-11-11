@@ -2,7 +2,7 @@
 
 插件通过 `telegram:channel` 系统上下文自动注入以下规则，无需修改 AGENTS.md。仅约束 Telegram 回复，不限制生成的文件内容。
 
-实现：`src/bridge.ts` 的 `TELEGRAM_CHANNEL_PROMPT`。回复和草稿均直接发送 `rich_message.markdown`，不再经过自写 Markdown→HTML 转换器；官方 Rich Markdown 和内嵌 Rich HTML 的解析由 Telegram 完成。不支持富消息、格式错误或超限时记录错误，不回退普通消息。菜单、固定状态通知和提问也统一使用 `sendRichMessage`，按钮与强制回复框通过 `reply_markup` 发送，不再降级为普通消息。
+实现：`src/bridge.ts` 的 `TELEGRAM_CHANNEL_PROMPT`。回复和草稿均直接发送 `rich_message.markdown`，不再经过自写 Markdown→HTML 转换器；官方 Rich Markdown 和内嵌 Rich HTML 的解析由 Telegram 完成。不支持富消息、格式错误或超限时记录错误，不回退普通消息。固定状态通知统一使用 `sendRichMessage`。菜单、提问和权限审批的操作区是面板小组件（`src/panel.ts`，Bot API 10.4 `sendWidget`）：小组件代码固定，插件只改写它最多 1024 字节的状态，点击以 `widget_query` 更新送达；提问正文仍是富消息，面板作为第二条消息跟在后面。不再使用内联按钮和强制回复框，也不为不支持小组件的客户端提供替代界面。
 
 核对依据：[Telegram 官方富消息格式说明](https://core.telegram.org/bots/api#rich-message-formatting-options)（2026-09-17）。以下是注入规则的同步副本：
 

@@ -1,6 +1,6 @@
 /**
  * Minimal Telegram Bot API client over `fetch`: long polling, native Rich
- * Markdown messages and drafts, inline keyboards, file uploads and downloads. The
+ * Markdown messages and drafts, inline keyboards, widgets, file uploads and downloads. The
  * token is embedded in the request URL, so every error path redacts it.
  * @module telegram/client
  */
@@ -35,17 +35,36 @@ export interface TelegramDocument extends TelegramFileReference {
     readonly file_name?: string;
     readonly mime_type?: string;
 }
+/** Received `RichText`: a string, an array, or a typed object; read through `rich-text.ts`. */
+export type TelegramRichText = unknown;
+/** Received rich message; its blocks are projected to text by `rich-text.ts`. */
+export interface TelegramRichMessage {
+    readonly blocks: readonly unknown[];
+}
+/** The part of the replied-to message that a reply quotes. */
+export interface TelegramTextQuote {
+    /** May be empty when the quote was chosen from a rich message. */
+    readonly text: string;
+    /** One entry per quoted text of a rich message (Bot API 10.4). */
+    readonly rich_texts?: readonly TelegramRichText[];
+    /** Set when the sender selected the quote; otherwise the server added it. */
+    readonly is_manual?: true;
+}
 /** Telegram message object; only the fields used by this plugin are modeled. */
 export interface TelegramMessage {
     readonly message_id: number;
     readonly chat: TelegramChat;
     readonly from?: TelegramUser;
     readonly text?: string;
+    /** Rich messages carry their content here instead of in `text`. */
+    readonly rich_message?: TelegramRichMessage;
     readonly caption?: string;
     readonly photo?: readonly TelegramPhotoSize[];
     readonly document?: TelegramDocument;
     readonly media_group_id?: string;
     readonly reply_to_message?: TelegramMessage;
+    /** Quoted part of `reply_to_message`, when the reply quotes only a part of it. */
+    readonly quote?: TelegramTextQuote;
     readonly date: number;
 }
 /** File metadata returned by Telegram's `getFile`. */
@@ -63,6 +82,25 @@ export interface TelegramCallbackQuery {
     readonly from: TelegramUser;
     readonly message?: TelegramMessage;
     readonly data?: string;
+}
+/** One request sent by a widget in a message of the bot (Bot API 10.4). */
+export interface TelegramWidgetQuery {
+    readonly id: string;
+    readonly from: TelegramUser;
+    /** Omitted for widgets in inline messages, which this plugin never sends. */
+    readonly chat?: TelegramChat;
+    readonly message_id?: number;
+    /** 1-64 bytes chosen by the widget's code. */
+    readonly data: string;
+}
+/** A widget to send: fixed HTML plus its initial per-message state. */
+export interface TelegramWidgetInput {
+    /** At most 32768 bytes, and 4096 bytes after zlib compression. */
+    readonly html: string;
+    /** Chat state, at most 1024 bytes; the only part that can change later. */
+    readonly chatData: string;
+    /** Plain text shown below the widget, and instead of it by apps without widget support. */
+    readonly caption?: string;
 }
 /** Inline button whose opaque callback payload is returned to the bot. */
 export interface TelegramInlineKeyboardButton {
@@ -86,6 +124,7 @@ export interface TelegramUpdate {
     readonly update_id: number;
     readonly message?: TelegramMessage;
     readonly callback_query?: TelegramCallbackQuery;
+    readonly widget_query?: TelegramWidgetQuery;
     readonly stopped_message_generation?: {
         readonly chat: TelegramChat;
         readonly draft_id: number;
@@ -123,6 +162,12 @@ export interface TelegramClientLike {
     editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Acknowledge a callback so Telegram dismisses the button progress spinner. */
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
+    /** Send an HTML widget that may send requests back as `widget_query` updates. */
+    sendWidget(chatId: number, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
+    /** Replace the chat state of a sent widget; its HTML can never change. */
+    editMessageWidgetData(chatId: number, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
+    /** Answer a widget's request within 15 seconds; `data` reaches only that widget. */
+    answerWidgetQuery(widgetQueryId: string, data?: string, signal?: AbortSignal): Promise<boolean>;
     /** Delete up to 100 messages from one chat in a single request. */
     deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
     /** Upload one file as a document; Telegram keeps the original bytes (images are not recompressed). */
@@ -208,6 +253,9 @@ export declare class TelegramClient implements TelegramClientLike {
     }>, signal?: AbortSignal): Promise<boolean>;
     editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
+    sendWidget(chatId: number, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
+    editMessageWidgetData(chatId: number, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
+    answerWidgetQuery(widgetQueryId: string, data?: string, signal?: AbortSignal): Promise<boolean>;
     deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
     /**
      * Upload a file through multipart `sendDocument`. The public Bot API accepts

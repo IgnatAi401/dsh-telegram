@@ -92,11 +92,21 @@ export declare class TelegramBridge {
     private runCompaction;
     /** Best-effort context occupancy after a compaction. */
     private contextOccupancyOf;
-    /** Bind callbacks to the state shown, so an old button cannot act on a newer selection. */
+    /** Bind taps to the state shown, so an old panel cannot act on a newer selection. */
     private menuFingerprint;
-    private handleMenuCallback;
-    /** Render one menu page; callbacks capture stable ids, never live catalog positions. */
+    private handleMenuTap;
+    /** Draw a menu page, telling the user when even that fails. */
     private showMenu;
+    /** Redraw the chat's open menu after its task state changed; never opens a new one. */
+    private refreshMenu;
+    /**
+     * Draw one menu page into the chat's panel widget, sending the widget when
+     * `messageId` is missing. Taps capture stable ids, never live catalog positions.
+     * @param resend - send a new panel when the old message is gone.
+     */
+    private renderMenu;
+    /** Replace a widget's state; an unchanged or deleted panel is not an error. */
+    private editWidget;
     private findModel;
     /**
      * Workspaces in registry order with their sessions' list metadata. Like the Web sidebar,
@@ -147,7 +157,7 @@ export declare class TelegramBridge {
     private saveWorkspaceFile;
     /** Admit collected images, preserve part order, then steer a running turn or queue a follow-up. */
     private submitParts;
-    /** Reuse question delivery and lifecycle, but grant only an explicit approval button. */
+    /** Reuse question delivery and lifecycle, but grant only an explicit tap on "allow". */
     private approveThroughTelegram;
     /** Claim one DSH user-question request for the chat bound to its session. */
     private askThroughTelegram;
@@ -157,27 +167,36 @@ export declare class TelegramBridge {
      * steered in through `userQuestions.answer`.
      */
     private continueTimedQuestion;
-    /** Handle one inline-keyboard choice and always dismiss Telegram's callback spinner. */
+    /** Inline keyboards belong to panels sent before the widget redesign; nothing uses them now. */
     private handleCallbackQuery;
-    /** Send the current item with buttons, or with a ForceReply composer for free text. */
+    /**
+     * Handle one tap inside a panel widget. The answer is sent after the handler
+     * has changed the panel, so the widget unlocks its buttons on the new state;
+     * a slow action is answered early, since Telegram allows 15 seconds.
+     */
+    private handleWidgetQuery;
+    /** Route one panel tap to the menu or to the waiting question. */
+    private handleInteraction;
+    /**
+     * Send the current item: its text as a rich message, then the panel widget
+     * with its controls. A widget's state is too small for the question itself
+     * and cannot render rich text.
+     */
     private presentQuestion;
-    /** Render a question with all details visible even when button labels must be shortened. */
+    /** The controls for the current item: an approval, a choice, or "send a message". */
+    private questionPanel;
+    /** The question as a rich message; option descriptions too long for the panel are spelled out here. */
     private formatQuestion;
-    /** Build the current keyboard; multi-select choices show their checked state. */
-    private questionKeyboard;
-    /** Enter free-text mode after the user explicitly presses the custom-answer button. */
-    private requestCustomAnswer;
     /** Store one answer, then present the next question or complete the batch. */
     private submitQuestionAnswer;
     private currentQuestion;
     /** Abort question delivery when either the bridge or a still-open DSH request ends. */
     private questionSignal;
     private selectedLabels;
-    /** Update checkmarks after toggling a multi-select option. */
-    private refreshQuestionKeyboard;
-    /** Remove an old keyboard so it cannot submit an answer twice. */
-    private clearQuestionKeyboard;
-    private editKeyboard;
+    /** Redraw the panel after a toggle or a switch to or from the custom answer. */
+    private refreshQuestionPanel;
+    /** Replace the controls with the outcome, so the panel cannot answer twice. */
+    private closeQuestionPanel;
     private resolvePendingQuestion;
     private rejectPendingQuestion;
     /** Atomically remove a pending request and its abort listener. */

@@ -28,6 +28,8 @@ Windows Desktop: on the app's Plugins page choose Add plugin and enter `github:I
 - `/help`: list available commands.
 - Send text, images, or files to start chatting.
 
+The control panel, questions and approvals are drawn as Telegram widgets, which need a recent Telegram app with widget support.
+
 Only private chats and allowed users are supported. Do not run multiple bot processes with the same token. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `~/.dsh/.env` from earlier releases still work; values saved on the Plugins page take precedence.
 
 ## Update

@@ -25,6 +25,8 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 /** Preserve Rich Markdown, but close unfinished fences/disclosures at each record boundary. */
 export declare function richBody(text: string): string;
+/** Whether a `<details>` summary is the process fold that {@link TelegramTranscript.render} writes. */
+export declare function isProcessSummary(summary: string): boolean;
 /** Retain visible assistant messages and counts only, never reasoning or tool payloads. */
 export declare class TelegramTranscript {
     private readonly messages;

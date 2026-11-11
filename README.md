@@ -28,6 +28,8 @@ Windows 桌面版：在 App 的“插件”页点“添加插件”，填入 `gi
 - `/help`：查看可用命令。
 - 直接发送文字、图片或文件开始对话。
 
+控制面板、提问和权限审批以 Telegram 小组件显示，需要支持小组件的较新 Telegram 客户端。
+
 仅支持私聊，只有允许的用户可以访问。同一个 token 不要同时运行多个机器人进程。旧版本写在 `~/.dsh/.env` 中的 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USER_IDS` 仍然有效，设置页中填写的值优先。
 
 ## 更新
