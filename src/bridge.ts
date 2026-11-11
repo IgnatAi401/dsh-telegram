@@ -637,6 +637,8 @@ export class TelegramBridge {
   /** Human-input requests keyed by Telegram chat id; at most one per chat. */
   private readonly pendingQuestions = new Map<number, PendingTelegramQuestion>()
   private readonly menus = new Map<number, MenuState>()
+  /** Serialize background refreshes and navigation through the same per-chat queue. */
+  private readonly menuUpdates = new Map<number, Promise<void>>()
   /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
   private readonly compacting = new Map<number, AbortController>()
   /** Work started off the polling loop; `stop` waits for it. */
@@ -727,7 +729,7 @@ export class TelegramBridge {
       this.stopTyping(entry)
       entry.progress?.dispose()
     }
-    await Promise.allSettled([this.pollTask, this.commandTask, ...entries.map(entry => entry.queue), ...this.backgroundTasks])
+    await Promise.allSettled([this.pollTask, this.commandTask, ...entries.map(entry => entry.queue), ...this.menuUpdates.values(), ...this.backgroundTasks])
     this.chats.clear()
     this.chatsBySession.clear()
     this.collections.clear()
@@ -1139,7 +1141,7 @@ export class TelegramBridge {
     this.menus.delete(chatId)
     try {
       if (menu.fingerprint !== this.menuFingerprint(chatId)) {
-        await this.showMenu(chatId, 'home', 0, undefined, { kind: 'info', text: '当前选择已变化，面板已刷新' }, messageId)
+        await this.showMenu(chatId, 'home', 0, undefined, { kind: 'info', text: '面板已刷新' }, messageId)
         return
       }
       await action()
@@ -1158,7 +1160,7 @@ export class TelegramBridge {
     messageId?: number,
   ): Promise<void> {
     try {
-      await this.renderMenu(chatId, view, page, workspaceId, notice, messageId, true)
+      await this.updateMenu(chatId, () => this.renderMenu(chatId, view, page, workspaceId, notice, messageId, true))
     } catch (error) {
       await this.safeSend(chatId, `⚠️ **控制面板暂时打不开**\n\n${richLiteral(messageOf(error))}\n\n请重新发送 /menu。`)
     }
@@ -1166,13 +1168,28 @@ export class TelegramBridge {
 
   /** Redraw the chat's open menu after its task state changed; never opens a new one. */
   private async refreshMenu(chatId: number): Promise<void> {
-    const menu = this.menus.get(chatId)
-    if (menu === undefined || this.stopped) return
+    await this.updateMenu(chatId, async () => {
+      // Read after preceding navigation, never restore a page captured before it.
+      const menu = this.menus.get(chatId)
+      if (menu === undefined) return
+      try {
+        await this.renderMenu(chatId, menu.view, menu.page, menu.workspaceId, undefined, menu.messageId, false)
+      } catch (error) {
+        if (isMissingMessage(error)) this.menus.delete(chatId)
+        else if (!this.stopped && !isNotModified(error)) this.ctx.logger.warn('[telegram] menu refresh failed: %s', messageOf(error))
+      }
+    })
+  }
+
+  /** Keep Telegram writes and their action bindings in the same order. */
+  private async updateMenu(chatId: number, task: () => Promise<void>): Promise<void> {
+    const previous = this.menuUpdates.get(chatId) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(async () => { if (!this.stopped) await task() })
+    this.menuUpdates.set(chatId, next)
     try {
-      await this.renderMenu(chatId, menu.view, menu.page, menu.workspaceId, undefined, menu.messageId, false)
-    } catch (error) {
-      if (isMissingMessage(error)) this.menus.delete(chatId)
-      else if (!this.stopped && !isNotModified(error)) this.ctx.logger.warn('[telegram] menu refresh failed: %s', messageOf(error))
+      await next
+    } finally {
+      if (this.menuUpdates.get(chatId) === next) this.menuUpdates.delete(chatId)
     }
   }
 
@@ -1229,11 +1246,11 @@ export class TelegramBridge {
         },
       }
     }
-    const changeModel = async (next: ModelSelection): Promise<void> => {
+    const changeModel = async (next: ModelSelection, message = '已切换模型'): Promise<void> => {
       if (active === undefined) throw new Error('请先选择或新建一个会话')
       idle()
       await this.ctx.sessionController.selectModel({ sessionId: active.sessionId, ...next })
-      await navigate('home', 0, undefined, { kind: 'ok', text: '已切换，新会话也会沿用这个选择' })
+      await navigate('home', 0, undefined, { kind: 'ok', text: message })
     }
     let panel: Panel
     if (view === 'home') {
@@ -1271,7 +1288,7 @@ export class TelegramBridge {
               idle()
               if (state.workspace === undefined) return navigate('workspaces', 0, undefined, { kind: 'info', text: '先选一个工作区' })
               await this.createSession(chatId, state.workspace)
-              await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已就绪，直接发消息开始' })
+              await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已创建' })
             }),
           },
           ...(active === undefined ? [] : [{
@@ -1279,16 +1296,17 @@ export class TelegramBridge {
             style: 'danger' as const,
             data: act(async () => {
               await this.archiveCurrent(chatId)
-              await navigate('home', 0, undefined, { kind: 'ok', text: '已归档，聊天记录仍然保留' })
+              await navigate('home', 0, undefined, { kind: 'ok', text: '已归档' })
             }),
           }]),
-          { text: '↻', data: go('home') },
+          { text: '刷新', data: go('home') },
         ]],
       }
     } else if (view === 'workspaces') {
       const { items, pager } = paged(catalog)
       panel = {
         header: { icon: '🗂', title: '工作区', subtitle: `共 ${catalog.length} 个`, back: go('home') },
+        plainRows: true,
         rows: items.map(entry => ({
           title: entry.workspace.title,
           subtitle: `${entry.sessions.length} 个会话`,
@@ -1304,6 +1322,7 @@ export class TelegramBridge {
       const { items, pager } = paged(entry.sessions)
       panel = {
         header: { icon: '💬', title: entry.workspace.title, subtitle: `${entry.sessions.length} 个会话`, back: go('workspaces') },
+        plainRows: true,
         rows: items.map((session): PanelRow => {
           const current = active?.sessionId === session.id
           const badges = [current ? '当前会话' : '', session.running ? '运行中' : '', session.archived ? '已归档' : ''].filter(Boolean)
@@ -1314,7 +1333,7 @@ export class TelegramBridge {
             data: act(async () => {
               idle()
               const result = await this.openSession(chatId, entry.workspace, session.id)
-              await navigate('home', 0, undefined, { kind: 'ok', text: result })
+              await navigate('home', 0, undefined, { kind: 'ok', text: result.startsWith('已取消归档') ? '已恢复并切换会话' : '已切换会话' })
             }),
           }
         }),
@@ -1326,7 +1345,7 @@ export class TelegramBridge {
           data: act(async () => {
             idle()
             await this.createSession(chatId, entry.workspace)
-            await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已就绪，直接发消息开始' })
+            await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已创建' })
           }),
         }]],
       }
@@ -1338,6 +1357,7 @@ export class TelegramBridge {
         : failed !== '' ? { kind: 'error', text: `${failed} 的模型列表读取失败` } : undefined
       panel = {
         header: { icon: '🤖', title: '模型', subtitle: modelName, back: go('home') },
+        plainRows: true,
         rows: items.map((choice) => {
           const selected = choice.provider === selection.provider && choice.id === selection.model
           return {
@@ -1357,11 +1377,12 @@ export class TelegramBridge {
       if (active === undefined) notice ??= { kind: 'info', text: '先选择或新建一个会话，才能调整推理强度' }
       panel = {
         header: { icon: '🧠', title: '推理强度', subtitle: modelName, back: go('home') },
+        plainRows: true,
         rows: items.map(choice => ({
           title: choice.name,
           ...(choice.description ? { subtitle: choice.description } : {}),
           mark: effort === choice.id ? 'current' : 'none',
-          data: act(() => changeModel({ provider: selection.provider, model: selection.model, reasoningEffort: choice.id })),
+          data: act(() => changeModel({ provider: selection.provider, model: selection.model, reasoningEffort: choice.id }, '已切换推理强度')),
         })),
         ...(efforts.length > 0 ? {} : { empty: { icon: '🧠', text: '这个模型不支持调整推理强度' } }),
         pager,

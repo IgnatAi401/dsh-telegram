@@ -48,6 +48,8 @@ export declare class TelegramBridge {
     /** Human-input requests keyed by Telegram chat id; at most one per chat. */
     private readonly pendingQuestions;
     private readonly menus;
+    /** Serialize background refreshes and navigation through the same per-chat queue. */
+    private readonly menuUpdates;
     /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
     private readonly compacting;
     /** Work started off the polling loop; `stop` waits for it. */
@@ -99,6 +101,8 @@ export declare class TelegramBridge {
     private showMenu;
     /** Redraw the chat's open menu after its task state changed; never opens a new one. */
     private refreshMenu;
+    /** Keep Telegram writes and their action bindings in the same order. */
+    private updateMenu;
     /**
      * Draw one menu page into the chat's panel widget, sending the widget when
      * `messageId` is missing. Taps capture stable ids, never live catalog positions.
