@@ -6,7 +6,7 @@
 
 核对依据：[Telegram 官方富消息格式说明](https://core.telegram.org/bots/api#rich-message-formatting-options)（2026-09-17）。以下是注入规则的同步副本：
 
-- 回复直接作为 Telegram Rich Markdown 发送，由 Telegram 原生解析；不要预先按 Telegram MarkdownV2 转义整段回复。支持官方 Rich HTML 扩展，不支持任意网页、CSS 或 JavaScript。
+- 回复直接作为 Telegram Rich Markdown 发送，由 Telegram 原生解析；不要预先按 Telegram MarkdownV2 转义整段回复。支持官方 Rich HTML 扩展；回复正文里不能放任意网页、CSS 或 JavaScript，需要脚本和动态效果时用 telegram_widget 工具发送小组件。
 - 使用 # 到 ###### 标题、段落、--- 分隔线、嵌套有序/无序列表。长回复用少量清晰小标题，段落间一个空行，不用空格或框线字符手工排版。
 - 默认用标题、段落、列表、粗体和代码块。下面的进阶元素只在所写场景下使用，不为装饰而用。
 - 行内支持 **粗体**、*斜体*、~~删除线~~、==高亮==、||剧透||、`代码`；下划线用 <u> 或 <ins>，上下标用 <sup> 与 <sub>。需要展示语法本身时放进代码块并指定语言。
@@ -29,6 +29,8 @@
 - 日期时间 <tg-time unix="Unix秒数" format="wDT">替代文字</tg-time>（也支持 tg://time 语法）会按用户本地时区显示，只用于需要精确到时刻的提醒、截止时间和日程；日常表述（如“下周三”）直接写文字。Unix 秒数用 date 命令计算，不要心算。Bot 无法获知用户时区，服务器时区也可能不同；用户给的时间时区不明确时先确认。
 - 原生按钮用 <tg-button>，按钮行用 <tg-button-row align="left|center|right">。可使用 type="url" 搭配 url、type="copy_text" 搭配 text，或 type="disabled"；样式为 primary、success、danger、link。按钮只用于两种情况：需要一键复制的内容（命令、单号、地址等，Telegram 代码块不能直接复制，copy_text 的 text 最长 256 字符），或回复只有一个必须打开的目标页面（type="url"）；其余用正文链接。
 - callback_data、web_app、login_url、switch_inline_query、switch_inline_query_current_chat、switch_inline_query_chosen_chat 按钮语法会原样传给 Telegram，但需要真实应用、域名或后端处理。当前插件只处理自己的菜单和提问按钮；不要生成自定义业务回调或承诺点击能执行工具。需要用户回答时使用已有 ask_user_question 工具。
+- 小组件规则（telegram_widget 工具的用途、沙箱限制、脚本 API 和大小上限）见 `src/widget.ts` 的 `WIDGET_PROMPT_LINES`，与工具定义放在一起以保持一致。
+- 用户可用 /menu 控制面板切换工作区、会话、模型和推理强度并查看状态与上下文占用，以及 /new、/stats、/compact、/resend；用户要切换模型、会话或查看用量时，Agent 引导其使用这些命令。提问和权限审批同样以面板显示。
 - <tg-thinking> 由插件在草稿中插入，不要输出。插件会把中间消息放进外层折叠记录，正文无需重复过程。
 - 富消息上限为 32768 个 UTF-8 字符、500 个块（含嵌套列表项及表格行）、16 层嵌套、50 个媒体、20 列表格。每条回复正文尽量少于 30000 字符，为插件运行记录留空间；超长内容应组织为精简回复和用 present 发送的文件。插件不截断最终答案、不转普通文本、不拆坏公式或脚注；超限或不支持的服务会明确记入发送失败日志。
 
@@ -54,3 +56,10 @@
 完整输出先写入每个聊天唯一的磁盘缓存，再发送；成功或失败均保留，便于客户端显示异常时重发。新完整输出覆盖旧缓存，开始新任务不清除旧缓存。`/resend` 可反复重发最后一份完整结果，加入命令列表但不加入 `/menu`。流式预览不缓存，DSH 历史日志不受影响。
 
 运行期间，含工具调用的中间消息一提交就作为临时真实消息发送；草稿只预览正在生成的正文。机器人发出任何消息（中间消息、提问或权限审批）都会让 Telegram 清除草稿，而沿用同一个 draft_id 会让草稿从头重放，所以每次发出消息后换用新的 draft_id，两次消息之间复用同一个。任务结束后只发送一次完整结果，发送成功后删除本轮的中间消息和提问；发送失败时保留它们。运行状态仅显示当前阶段和总耗时，不显示工具名称、逐项勾选、单次工具耗时或已完成调用列表。模型正文含 details/summary 标签或超过 16000 个 UTF-16 代码单元时，草稿改为等待提示，完整内容在生成完成后发送，不截断富文本结构。
+
+## Agent 小组件
+
+`telegram_widget` 工具（`src/widget.ts`）只注册在绑定了 Telegram 私聊的会话的 Agent 作用域里：绑定会话、Telegram 提交输入和 `agent/created`（Agent 被替换）时注册，解除绑定或插件停止时移除，Web 独有的会话看不到它。
+
+- `send`：Agent 自己编写完整 HTML，插件只校验 Bot API 10.4 限制（HTML 32768 字节、zlib 9 级压缩后 4096 字节、无 NUL；chat_data 1024 字节；caption 1024 字符；高度 50–600、宽度至少 200）后原样调用 `sendWidget`，不使用插件面板的渲染器。发送时不带 `allow_queries`，小组件的 `TelegramWidget.request` 会被 Telegram 拒绝，点击不会回到插件或 Agent。消息按聊天的发送队列排在中间消息之后，发出后换新的 draft_id；它不是临时消息，任务结束后保留。
+- `update`：用 `editMessageWidgetData` 整体替换 chat_data；只接受本次绑定期间由该工具发出的 message_id，插件自己的菜单和提问面板不能被改写。“message is not modified” 视为成功。

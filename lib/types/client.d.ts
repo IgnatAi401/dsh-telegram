@@ -101,6 +101,11 @@ export interface TelegramWidgetInput {
     readonly chatData: string;
     /** Plain text shown below the widget, and instead of it by apps without widget support. */
     readonly caption?: string;
+    /** Logical pixels; omitted fills the bubble width / follows the content height. */
+    readonly width?: number;
+    readonly height?: number;
+    /** Whether the widget may send `widget_query` requests; defaults to true (the bridge's panels). */
+    readonly allowQueries?: boolean;
 }
 /** Inline button whose opaque callback payload is returned to the bot. */
 export interface TelegramInlineKeyboardButton {

@@ -115,6 +115,11 @@ export interface TelegramWidgetInput {
   readonly chatData: string
   /** Plain text shown below the widget, and instead of it by apps without widget support. */
   readonly caption?: string
+  /** Logical pixels; omitted fills the bubble width / follows the content height. */
+  readonly width?: number
+  readonly height?: number
+  /** Whether the widget may send `widget_query` requests; defaults to true (the bridge's panels). */
+  readonly allowQueries?: boolean
 }
 
 /** Inline button whose opaque callback payload is returned to the bot. */
@@ -471,9 +476,11 @@ export class TelegramClient implements TelegramClientLike {
     return this.call<TelegramMessage>('sendWidget', {
       chat_id: chatId,
       html: widget.html,
-      chat_data: widget.chatData,
-      allow_queries: true,
+      ...(widget.chatData === '' ? {} : { chat_data: widget.chatData }),
+      ...(widget.allowQueries === false ? {} : { allow_queries: true }),
       ...(widget.caption === undefined ? {} : { caption: widget.caption }),
+      ...(widget.width === undefined ? {} : { width: widget.width }),
+      ...(widget.height === undefined ? {} : { height: widget.height }),
     }, signal)
   }
 

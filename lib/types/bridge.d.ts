@@ -56,6 +56,8 @@ export declare class TelegramBridge {
     private readonly backgroundTasks;
     private readonly abortController;
     private readonly disposers;
+    /** `telegram_widget` registrations in the scope of each Agent of a bound session. */
+    private readonly widgetTools;
     private offset;
     private started;
     private stopped;
@@ -129,6 +131,19 @@ export declare class TelegramBridge {
     /** Bind this chat to an existing session, unarchiving it first when needed. */
     private openSession;
     private bind;
+    /**
+     * Register `telegram_widget` in the Agent's own scope, so only sessions bound
+     * to a Telegram chat see it. A failure leaves the channel without the tool.
+     */
+    private ensureWidgetTool;
+    /** Remove the tool from the Agents of a session that lost its chat. */
+    private dropWidgetTools;
+    private widgetChat;
+    /** Run one Telegram call in the chat's delivery order and hand back its outcome. */
+    private inChatOrder;
+    /** Send the Agent's own widget code; it stays in the chat after the turn. */
+    private sendAgentWidget;
+    private updateAgentWidget;
     /** Forget the Telegram binding; the DSH session and its Agent are unaffected. */
     private releaseActive;
     /** Archive through the Workspace registry, then release the Telegram selection. */

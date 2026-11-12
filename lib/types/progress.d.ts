@@ -61,6 +61,8 @@ export declare class TelegramProgress {
     private changed;
     /** Invalidate queued previews before a persisted assistant message or user question. */
     pause(): void;
+    /** A message sent outside the progress (an Agent widget) cleared the draft; continue in a fresh one. */
+    interrupt(): void;
     /** The question message clears the draft; continue in a fresh one afterwards. */
     suspend(): void;
     resume(): void;

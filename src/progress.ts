@@ -172,6 +172,14 @@ export class TelegramProgress {
     this.epoch++
   }
 
+  /** A message sent outside the progress (an Agent widget) cleared the draft; continue in a fresh one. */
+  interrupt(): void {
+    if (this.disposed) return
+    this.pause()
+    this.newDraft()
+    this.changed()
+  }
+
   /** The question message clears the draft; continue in a fresh one afterwards. */
   suspend(): void {
     this.waitingForUser = true
