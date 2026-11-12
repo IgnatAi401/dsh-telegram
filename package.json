@@ -1,7 +1,7 @@
 {
   "name": "dsh-telegram",
   "description": "Telegram Bot API bridge plugin for DeepSeek Harness: relay private Telegram chats to DSH sessions (long polling, rich messages, inline menus)",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
