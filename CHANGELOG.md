@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix every upload (files delivered with `present`, embedded images, videos and audio): since uploads moved to `undici` in 0.4.0, the form was sent as the text `[object FormData]` and Telegram answered `there is no document in the request`. Uploads now build their form with `undici`'s own `FormData`.
+
 ## 0.4.0
 
 - Make panel taps faster (about 0.7 s instead of 1.5–3 s through a distant proxy): Bot API calls share one HTTP/2 session that the long poll keeps open, so no tap waits for a new TLS handshake, and a tap is answered while its new panel state is written instead of after it. The panel keeps its controls locked until that state arrives. Uploads, `NODE_USE_ENV_PROXY` setups and servers without HTTP/2 use `undici` with idle connections kept for a minute. Each tap logs its total and per-call timings at info level.

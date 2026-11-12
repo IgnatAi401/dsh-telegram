@@ -5,7 +5,10 @@
  * @module telegram/client
  */
 
-import { Agent, EnvHttpProxyAgent, fetch as undiciFetch } from 'undici'
+// Uploads go through the `undici` package's fetch, which encodes only its own
+// FormData class: Node's global FormData comes from the copy of undici bundled
+// with Node, so it would be sent as the string "[object FormData]".
+import { Agent, EnvHttpProxyAgent, FormData, fetch as undiciFetch } from 'undici'
 import { http2Fetch } from './http2-fetch.js'
 
 /**
