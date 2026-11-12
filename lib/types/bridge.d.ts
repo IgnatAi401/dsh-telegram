@@ -50,6 +50,8 @@ export declare class TelegramBridge {
     private readonly menus;
     /** Serialize background refreshes and navigation through the same per-chat queue. */
     private readonly menuUpdates;
+    /** The panel tap each chat is handling; taps are handled one at a time by the polling loop. */
+    private readonly taps;
     /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
     private readonly compacting;
     /** Work started off the polling loop; `stop` waits for it. */
@@ -113,6 +115,13 @@ export declare class TelegramBridge {
     private renderMenu;
     /** Replace a widget's state; an unchanged or deleted panel is not an error. */
     private editWidget;
+    /**
+     * Write a bridge panel's state. A tap on that panel is answered in parallel
+     * instead of after the write, so the user waits one round trip, not two.
+     */
+    private writePanel;
+    /** Record how long one step of the chat's current panel tap took. */
+    private tapPhase;
     private findModel;
     /**
      * Workspaces in registry order with their sessions' list metadata. Like the Web sidebar,

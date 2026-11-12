@@ -5,6 +5,33 @@
  * @module telegram/client
  */
 
+import { Agent, EnvHttpProxyAgent, fetch as undiciFetch } from 'undici'
+import { http2Fetch } from './http2-fetch.js'
+
+/**
+ * Node's global `fetch` closes an idle connection after 4 seconds, and a new
+ * TLS handshake to the Bot API can take a second, so a panel tap after a pause
+ * paid that for every call. Bot API calls share one HTTP/2 session that the
+ * long poll keeps open ({@link http2Fetch}); uploads, and everything when the
+ * session cannot be opened, use `undici` with idle connections kept for a minute.
+ */
+const KEEP_ALIVE_MS = 60_000
+let sharedFetch: typeof fetch | undefined
+
+/** One transport for every client, honouring `NODE_USE_ENV_PROXY` like the global `fetch`. */
+function keepAliveFetch(): typeof fetch {
+  if (sharedFetch === undefined) {
+    const options = { keepAliveTimeout: KEEP_ALIVE_MS, keepAliveMaxTimeout: KEEP_ALIVE_MS }
+    const useEnvProxy = ['1', 'true'].includes(process.env.NODE_USE_ENV_PROXY ?? '')
+    const dispatcher = useEnvProxy ? new EnvHttpProxyAgent(options) : new Agent(options)
+    const http1 = ((input: string, init?: RequestInit) =>
+      undiciFetch(input, { ...init, dispatcher } as Parameters<typeof undiciFetch>[1])) as unknown as typeof fetch
+    // An HTTP proxy from the environment cannot carry the direct HTTP/2 session.
+    sharedFetch = useEnvProxy ? http1 : http2Fetch(http1)
+  }
+  return sharedFetch
+}
+
 /** Telegram user object (sender of a message). */
 export interface TelegramUser {
   readonly id: number
@@ -206,7 +233,7 @@ export interface TelegramClientLike {
 
 /** Options for {@link TelegramClient}. */
 export interface TelegramClientOptions {
-  /** HTTP client seam; production uses the global `fetch`. */
+  /** HTTP client seam; production uses a shared HTTP/2 session with an `undici` fallback. */
   fetch?: typeof fetch
   /** API base URL; production uses the public Bot API. */
   baseUrl?: string
@@ -270,7 +297,7 @@ export class TelegramClient implements TelegramClientLike {
       throw new Error('telegram client: pollingTimeoutSec must be a positive integer')
     }
     this.token = normalizedToken
-    this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.fetchImpl = options.fetch ?? keepAliveFetch()
     this.baseUrl = (options.baseUrl ?? 'https://api.telegram.org').replace(/\/+$/, '')
     this.pollingTimeoutSec = pollingTimeoutSec
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15000

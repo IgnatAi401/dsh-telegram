@@ -83,6 +83,21 @@ interface PanelInteraction {
   answer(text?: string): Promise<void>
 }
 
+/**
+ * The panel tap a chat is handling. Writing that panel's new state answers the
+ * tap at the same time, saving a Bot API round trip; `phases` records where the
+ * time went for the log line written once the tap is answered.
+ */
+interface PanelTap {
+  readonly messageId: number
+  readonly phases: string[]
+  /**
+   * Answer now. Taps set their answer text before any write, and the widget
+   * keeps its controls locked after an empty answer until the new state arrives.
+   */
+  answerEarly(): void
+}
+
 /** The DSH session currently bound to one Telegram chat. */
 interface ActiveChatSession {
   readonly chatId: number
@@ -647,6 +662,8 @@ export class TelegramBridge {
   private readonly menus = new Map<number, MenuState>()
   /** Serialize background refreshes and navigation through the same per-chat queue. */
   private readonly menuUpdates = new Map<number, Promise<void>>()
+  /** The panel tap each chat is handling; taps are handled one at a time by the polling loop. */
+  private readonly taps = new Map<number, PanelTap>()
   /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
   private readonly compacting = new Map<number, AbortController>()
   /** Work started off the polling loop; `stop` waits for it. */
@@ -1228,11 +1245,13 @@ export class TelegramBridge {
   ): Promise<void> {
     const state = this.stateFor(chatId)
     const active = state.active
+    const loadStarted = performance.now()
     const [catalog, models, status] = await Promise.all([
       this.loadCatalog(active?.sessionId),
       this.ctx.sessionController.modelCatalog(),
       active === undefined ? undefined : this.sessionStatus(active.sessionId),
     ])
+    this.tapPhase(chatId, 'load', loadStarted)
     const selection = status?.selection ?? models.default
     const token = callbackToken()
     const actions: Array<() => Promise<void>> = []
@@ -1276,21 +1295,21 @@ export class TelegramBridge {
       const collection = this.collections.get(chatId)
       const occupancy = status?.occupancy
       panel = {
-        header: { icon: '🎛', title: '控制面板' },
+        header: { icon: 'panel', title: '控制面板' },
         status: this.pendingQuestions.has(chatId) ? { kind: 'wait', text: '等待你的回答' }
           : running ? { kind: 'live', text: '运行中', ...(active.turnStartedAt === undefined ? {} : { since: active.turnStartedAt }) }
             : collection !== undefined ? { kind: 'wait', text: `收集中 · 已有 ${collection.parts.length} 项` }
               : { kind: 'idle', text: active === undefined ? '还没有连接会话' : '空闲' },
         tiles: [
-          { icon: '🗂', label: '工作区', value: state.workspace?.title ?? '未选择', data: go('workspaces') },
+          { icon: 'folder', label: '工作区', value: state.workspace?.title ?? '未选择', data: go('workspaces') },
           {
-            icon: '💬',
+            icon: 'chat',
             label: '会话',
             value: active === undefined ? '未选择' : status?.title ?? active.sessionId,
             data: state.workspace === undefined ? go('workspaces') : go('sessions', 0, state.workspace.id),
           },
-          { icon: '🤖', label: '模型', value: modelName, data: go('models') },
-          { icon: '🧠', label: '推理强度', value: effortName, data: go('reasoning') },
+          { icon: 'model', label: '模型', value: modelName, data: go('models') },
+          { icon: 'spark', label: '推理强度', value: effortName, data: go('reasoning') },
         ],
         ...(occupancy === undefined ? {} : {
           meter: {
@@ -1324,7 +1343,7 @@ export class TelegramBridge {
     } else if (view === 'workspaces') {
       const { items, pager } = paged(catalog)
       panel = {
-        header: { icon: '🗂', title: '工作区', subtitle: `共 ${catalog.length} 个`, back: go('home') },
+        header: { icon: 'folder', title: '工作区', subtitle: `共 ${catalog.length} 个`, back: go('home') },
         plainRows: true,
         rows: items.map(entry => ({
           title: entry.workspace.title,
@@ -1332,7 +1351,7 @@ export class TelegramBridge {
           data: go('sessions', 0, entry.workspace.id),
           mark: state.workspace?.id === entry.workspace.id ? 'current' : 'none',
         })),
-        ...(catalog.length > 0 ? {} : { empty: { icon: '📭', text: '还没有工作区，请先在 Web UI 中添加' } }),
+        ...(catalog.length > 0 ? {} : { empty: { icon: 'folder', text: '还没有工作区，请先在 Web UI 中添加' } }),
         pager,
       }
     } else if (view === 'sessions') {
@@ -1340,7 +1359,7 @@ export class TelegramBridge {
       if (entry === undefined) throw new Error('这个工作区已被移除')
       const { items, pager } = paged(entry.sessions)
       panel = {
-        header: { icon: '💬', title: entry.workspace.title, subtitle: `${entry.sessions.length} 个会话`, back: go('workspaces') },
+        header: { icon: 'chat', title: entry.workspace.title, subtitle: `${entry.sessions.length} 个会话`, back: go('workspaces') },
         plainRows: true,
         rows: items.map((session): PanelRow => {
           const current = active?.sessionId === session.id
@@ -1356,7 +1375,7 @@ export class TelegramBridge {
             }),
           }
         }),
-        ...(entry.sessions.length > 0 ? {} : { empty: { icon: '🌱', text: '这里还没有会话' } }),
+        ...(entry.sessions.length > 0 ? {} : { empty: { icon: 'chat', text: '这里还没有会话' } }),
         pager,
         actions: [[{
           text: '＋ 在此新建会话',
@@ -1375,7 +1394,7 @@ export class TelegramBridge {
       notice ??= active === undefined ? { kind: 'info', text: '先选择或新建一个会话，才能切换模型' }
         : failed !== '' ? { kind: 'error', text: `${failed} 的模型列表读取失败` } : undefined
       panel = {
-        header: { icon: '🤖', title: '模型', subtitle: modelName, back: go('home') },
+        header: { icon: 'model', title: '模型', subtitle: modelName, back: go('home') },
         plainRows: true,
         rows: items.map((choice) => {
           const selected = choice.provider === selection.provider && choice.id === selection.model
@@ -1386,7 +1405,7 @@ export class TelegramBridge {
             data: act(() => changeModel({ provider: choice.provider, model: choice.id })),
           }
         }),
-        ...(choices.length > 0 ? {} : { empty: { icon: '🤖', text: '没有可用的模型' } }),
+        ...(choices.length > 0 ? {} : { empty: { icon: 'model', text: '没有可用的模型' } }),
         pager,
         footer: '切换后，推理强度会回到该模型的默认值',
       }
@@ -1395,7 +1414,7 @@ export class TelegramBridge {
       const { items, pager } = paged(efforts)
       if (active === undefined) notice ??= { kind: 'info', text: '先选择或新建一个会话，才能调整推理强度' }
       panel = {
-        header: { icon: '🧠', title: '推理强度', subtitle: modelName, back: go('home') },
+        header: { icon: 'spark', title: '推理强度', subtitle: modelName, back: go('home') },
         plainRows: true,
         rows: items.map(choice => ({
           title: choice.name,
@@ -1403,19 +1422,23 @@ export class TelegramBridge {
           mark: effort === choice.id ? 'current' : 'none',
           data: act(() => changeModel({ provider: selection.provider, model: selection.model, reasoningEffort: choice.id }, '已切换推理强度')),
         })),
-        ...(efforts.length > 0 ? {} : { empty: { icon: '🧠', text: '这个模型不支持调整推理强度' } }),
+        ...(efforts.length > 0 ? {} : { empty: { icon: 'spark', text: '这个模型不支持调整推理强度' } }),
         pager,
       }
     }
     const chatData = encodePanel({ ...panel, prefix: `menu:${token}:`, ...(notice === undefined ? {} : { notice }) })
     const old = this.menus.get(chatId)
-    const send = async (): Promise<number> =>
-      (await this.client.sendWidget(chatId, { html: PANEL_HTML, chatData }, this.abortController.signal)).message_id
+    const send = async (): Promise<number> => {
+      const started = performance.now()
+      const sent = await this.client.sendWidget(chatId, { html: PANEL_HTML, chatData }, this.abortController.signal)
+      this.tapPhase(chatId, 'send', started)
+      return sent.message_id
+    }
     if (messageId === undefined) {
       messageId = await send()
     } else {
       try {
-        await this.client.editMessageWidgetData(chatId, messageId, chatData, this.abortController.signal)
+        await this.writePanel(chatId, messageId, chatData)
       } catch (error) {
         // The user deleted the panel: a tap or /menu deserves a fresh one.
         if (!resend || !isMissingMessage(error)) throw error
@@ -1430,12 +1453,32 @@ export class TelegramBridge {
   /** Replace a widget's state; an unchanged or deleted panel is not an error. */
   private async editWidget(chatId: number, messageId: number, panel: Panel): Promise<void> {
     try {
-      await this.client.editMessageWidgetData(chatId, messageId, encodePanel(panel), this.abortController.signal)
+      await this.writePanel(chatId, messageId, encodePanel(panel))
     } catch (error) {
       if (!this.stopped && !isNotModified(error) && !isMissingMessage(error)) {
         this.ctx.logger.warn('[telegram] panel update failed: %s', messageOf(error))
       }
     }
+  }
+
+  /**
+   * Write a bridge panel's state. A tap on that panel is answered in parallel
+   * instead of after the write, so the user waits one round trip, not two.
+   */
+  private async writePanel(chatId: number, messageId: number, chatData: string): Promise<void> {
+    const tap = this.taps.get(chatId)
+    if (tap?.messageId === messageId) tap.answerEarly()
+    const started = performance.now()
+    try {
+      await this.client.editMessageWidgetData(chatId, messageId, chatData, this.abortController.signal)
+    } finally {
+      this.tapPhase(chatId, 'edit', started)
+    }
+  }
+
+  /** Record how long one step of the chat's current panel tap took. */
+  private tapPhase(chatId: number, label: string, started: number): void {
+    this.taps.get(chatId)?.phases.push(`${label} ${Math.round(performance.now() - started)}ms`)
   }
 
   private findModel(catalog: ModelCatalog, selection: ModelSelection): ModelCatalogModel | undefined {
@@ -2025,32 +2068,39 @@ export class TelegramBridge {
    * a slow action is answered early, since Telegram allows 15 seconds.
    */
   private async handleWidgetQuery(query: TelegramWidgetQuery): Promise<void> {
+    const started = performance.now()
+    const phases: string[] = []
     let text: string | undefined
-    let answered = false
-    const flush = async (): Promise<void> => {
-      if (answered) return
-      answered = true
+    let answering: Promise<void> | undefined
+    const flush = (): Promise<void> => answering ??= (async () => {
       clearTimeout(timer)
+      const answerStarted = performance.now()
       try {
         await this.client.answerWidgetQuery(query.id, text === undefined ? undefined : truncateText(text, 200), this.abortController.signal)
       } catch (error) {
         if (!this.stopped) this.ctx.logger.warn('[telegram] widget acknowledgement failed: %s', messageOf(error))
       }
-    }
+      phases.push(`answer ${Math.round(performance.now() - answerStarted)}ms`)
+    })()
     const timer = setTimeout(() => { void flush() }, WIDGET_ANSWER_DEADLINE_MS)
+    const chatId = query.chat?.id
     try {
-      if (query.chat?.type !== 'private' || query.message_id === undefined) text = '这个面板不可用。'
+      if (query.chat?.type !== 'private' || query.message_id === undefined || chatId === undefined) text = '这个面板不可用。'
       else if (!this.authorizedUser(query.from)) text = '⛔ 访问被拒绝'
       else {
+        this.taps.set(chatId, { messageId: query.message_id, phases, answerEarly: () => { void flush() } })
         await this.handleInteraction({
-          chatId: query.chat.id,
+          chatId,
           messageId: query.message_id,
           data: query.data,
           answer: async (message) => { text = message ?? text },
         })
       }
     } finally {
+      if (chatId !== undefined) this.taps.delete(chatId)
       await flush()
+      this.ctx.logger.info('[telegram] panel tap %s: %dms (%s)', query.data.split(':', 1)[0],
+        Math.round(performance.now() - started), phases.join(', ') || 'no Bot API calls')
     }
   }
 
@@ -2130,7 +2180,7 @@ export class TelegramBridge {
     if (pending.approval) {
       return {
         prefix,
-        header: { icon: '🛡', title: '需要你的授权' },
+        header: { icon: 'shield', title: '需要你的授权' },
         status: { kind: 'wait', text: `${pending.tool ?? '工具'} · 仅本次有效` },
         actions: [[{ text: APPROVE_ONCE, data: 'o0', style: 'success' }, { text: REJECT, data: 'o1', style: 'danger' }]],
       }
@@ -2146,7 +2196,7 @@ export class TelegramBridge {
         prefix,
         steps,
         header: {
-          icon: '✍️',
+          icon: 'chat',
           title: '等你输入',
           subtitle: selected > 0 ? `会连同已选的 ${selected} 项一起提交` : '直接发送一条消息作为回答',
         },
@@ -2159,7 +2209,7 @@ export class TelegramBridge {
       prefix,
       steps,
       header: {
-        icon: '❓',
+        icon: 'ask',
         title: multi ? '可以多选' : '请选择一项',
         subtitle: position ?? (multi ? '选好后点“完成”' : '也可以直接发消息回答'),
       },
@@ -2171,7 +2221,7 @@ export class TelegramBridge {
       })),
       actions: [
         ...(multi ? [[{ text: selected > 0 ? `完成 · ${selected} 项` : '完成', data: 'd', style: 'primary' as const }]] : []),
-        [{ text: '✍️ 自定义', data: 'u' }, ...leave],
+        [{ text: '自定义', data: 'u' }, ...leave],
       ],
     }
   }
@@ -2194,27 +2244,32 @@ export class TelegramBridge {
   private async submitQuestionAnswer(pending: PendingTelegramQuestion, answer: AskUserQuestionAnswerItem): Promise<void> {
     if (pending.settled || answer.id !== this.currentQuestion(pending).id) return
     const summary = [answer.selected.join('、'), answer.custom ?? ''].filter(Boolean).join(' · ')
-    await this.closeQuestionPanel(pending, summary === '' ? { kind: 'neutral', title: '已跳过' }
+    // The panel closes synchronously (it cannot answer twice) and redraws in
+    // parallel: the Agent, or the next question, need not wait for Telegram.
+    const closing = this.closeQuestionPanel(pending, summary === '' ? { kind: 'neutral', title: '已跳过' }
       : !pending.approval ? { kind: 'success', title: '已回答', text: summary }
         : answer.selected[0] === APPROVE_ONCE ? { kind: 'success', title: '已允许本次操作' }
           : { kind: 'cancelled', title: '已拒绝' })
-    if (pending.settled) return
-    pending.answers.push(answer)
-    pending.index += 1
-    pending.selectedIndices = new Set()
-    pending.awaitingCustom = false
-    if (pending.index >= pending.questions.length) {
-      await this.resolvePendingQuestion(pending)
-      return
-    }
     try {
-      await this.presentQuestion(pending)
-    } catch (error) {
-      this.rejectPendingQuestion(pending, userQuestionError(
-        `could not deliver ask_user_question to Telegram: ${messageOf(error)}`,
-        pending.signal?.aborted === true ? 'ASK_ABORTED' : 'ASK_DELIVERY_FAILED',
-        error,
-      ))
+      pending.answers.push(answer)
+      pending.index += 1
+      pending.selectedIndices = new Set()
+      pending.awaitingCustom = false
+      if (pending.index >= pending.questions.length) {
+        await this.resolvePendingQuestion(pending)
+        return
+      }
+      try {
+        await this.presentQuestion(pending)
+      } catch (error) {
+        this.rejectPendingQuestion(pending, userQuestionError(
+          `could not deliver ask_user_question to Telegram: ${messageOf(error)}`,
+          pending.signal?.aborted === true ? 'ASK_ABORTED' : 'ASK_DELIVERY_FAILED',
+          error,
+        ))
+      }
+    } finally {
+      await closing
     }
   }
 

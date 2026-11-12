@@ -182,7 +182,7 @@ export interface TelegramClientLike {
 }
 /** Options for {@link TelegramClient}. */
 export interface TelegramClientOptions {
-    /** HTTP client seam; production uses the global `fetch`. */
+    /** HTTP client seam; production uses a shared HTTP/2 session with an `undici` fallback. */
     fetch?: typeof fetch;
     /** API base URL; production uses the public Bot API. */
     baseUrl?: string;

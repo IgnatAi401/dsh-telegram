@@ -22,6 +22,12 @@ export type PanelButtonStyle = 'primary' | 'ghost' | 'danger' | 'success'
 /** Leading mark of a list row: a chevron, the current choice, a checkbox, or its number. */
 export type PanelRowMark = 'none' | 'current' | 'unchecked' | 'checked' | 'number'
 
+/**
+ * Built-in line icons drawn by the renderer, each with its own accent colour.
+ * Any other string is shown as text, so an old state with an emoji still renders.
+ */
+export type PanelIcon = 'panel' | 'folder' | 'chat' | 'model' | 'spark' | 'shield' | 'ask'
+
 export interface PanelButton {
   readonly text: string
   /** Request data sent on a tap, without the panel's prefix; omitted draws a disabled control. */
@@ -30,7 +36,7 @@ export interface PanelButton {
 }
 
 export interface PanelTile {
-  readonly icon: string
+  readonly icon: PanelIcon
   readonly label: string
   readonly value: string
   readonly data?: string
@@ -47,7 +53,7 @@ export interface Panel {
   /** Common prefix of every control's request data. */
   readonly prefix?: string
   /** Icon badge, title and a line below it; `back` adds a round back button. */
-  readonly header?: { readonly icon: string, readonly title: string, readonly subtitle?: string, readonly back?: string }
+  readonly header?: { readonly icon: PanelIcon, readonly title: string, readonly subtitle?: string, readonly back?: string }
   /** Replaces the header's subtitle with a status dot; `since` (Unix seconds) adds a running clock. */
   readonly status?: { readonly kind: 'idle' | 'live' | 'wait', readonly text: string, readonly since?: number }
   readonly notice?: { readonly kind: 'info' | 'ok' | 'error', readonly text: string }
@@ -61,7 +67,7 @@ export interface Panel {
   /** Navigation lists use selection marks without an outline around each row. */
   readonly plainRows?: boolean
   /** Placeholder for an empty list. */
-  readonly empty?: { readonly icon: string, readonly text: string }
+  readonly empty?: { readonly icon: PanelIcon, readonly text: string }
   readonly text?: string
   /** Bouncing dots: the bridge is waiting for the user's next message. */
   readonly listening?: boolean
@@ -76,7 +82,10 @@ export interface Panel {
 /**
  * The renderer reuses elements by position when the bridge changes the state,
  * blocks further taps while a request is in flight, and shows each answer's
- * text (or why the request failed) in the header's upper-right corner. Telegram refuses
+ * text (or why the request failed) in the header's upper-right corner. The
+ * bridge answers a tap while it writes the new state, so an empty answer that
+ * beats that state keeps taps blocked until it is drawn (`pend` doubles as the
+ * 3-second fallback delay). Telegram refuses
  * a widget whose HTML exceeds 4096 bytes after zlib compression.
  *
  * `el` advances a cursor on each parent and reuses a matching child; `trim`
@@ -86,77 +95,77 @@ export interface Panel {
  * lives over the heading; header feedback never adds document height.
  * Avoid class names differing only in
  * case: renderers in quirks mode can match them case-insensitively.
- * The root and ordinary controls stay transparent over the chat bubble.
- * Text follows the chat palette; only primary and approval actions are filled.
+ * The root stays transparent over the chat bubble; cards, rows and secondary
+ * buttons sit on a soft neutral fill (an rgba colour, not `opacity`), so they
+ * layer on light and dark themes alike. Icons are stroked SVG on a solid accent
+ * badge; only primary and approval actions are filled with a strong colour.
  * Status padding and negative margins reserve the pulse's 3px visual overflow
  * without moving the dot or changing the header's layout height.
  */
 export const PANEL_HTML = `<!doctype html><style>
 *{box-sizing:border-box}
-html{height:auto;min-height:0;--ink:var(--tg-theme-text-color);--h:var(--tg-theme-hint-color);--b:var(--tg-theme-button-color);--edge:var(--h);--track:rgba(0,0,0,.18);--d:#c72c30;--g:#008a30;--check:var(--tg-theme-button-text-color);background:none;color:var(--ink)}
-body{position:relative;height:auto;min-height:0;margin:0;padding:12px 12px max(12px,var(--tg-content-safe-area-inset-bottom,0px));background:none;color:var(--ink)}
-@media(prefers-color-scheme:dark){html{--d:#ff453a;--g:#30d36b;--track:rgba(0,0,0,.35)}}
+html{height:auto;min-height:0;--h:var(--tg-theme-hint-color);--b:var(--tg-theme-button-color);--s:rgba(120,120,128,.14);--s2:rgba(120,120,128,.28);--d:#e44;--g:#2a5;background:none;color:var(--tg-theme-text-color)}
+body{position:relative;height:auto;min-height:0;margin:0;padding:12px 12px max(12px,var(--tg-content-safe-area-inset-bottom,0px));background:none}
 #a{display:flex;flex-direction:column;gap:10px}
 button{appearance:none;font:inherit;color:inherit;border:0;margin:0;padding:0;min-height:0;background:none;text-align:left;position:relative}
-.busy button{pointer-events:none}
-b,small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+b,small,.A button,#o{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 small{color:var(--h);font-size:.8em}
-.H{display:flex;align-items:center;gap:10px}
-.I{width:40px;height:40px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:1.35em;flex:none}
-.B{width:30px;height:30px;border-radius:15px;text-align:center;font-size:1.3em;line-height:28px;flex:none}
+svg{display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.H{display:flex;align-items:center;gap:12px}
+.I{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--c,var(--s));color:#fff}
+.I svg{width:21px;height:21px}
+.B,.G button{width:30px;height:30px;border-radius:15px;background:var(--s);text-align:center;font-size:1.25em;line-height:28px;flex:none}
 .T,.X{flex:1;min-width:0}
-.T{text-align:left}
-.H .T b{position:relative;font-size:1.1em;padding-right:var(--notice-space,24px)}
+.H .T b{position:relative;font-size:1.12em;padding-right:var(--ns,24px)}
 .P{display:flex;align-items:center;gap:6px;padding:3px;margin:-3px}
 .P u{width:7px;height:7px;border-radius:50%;background:var(--h);flex:none}
 .live u{background:var(--g);animation:q 1.2s ease-in-out infinite}
-.y u{background:var(--b)}
+.y u{background:#f90}
 .Q{display:flex;gap:4px}
-.Q i{flex:1;height:4px;border-radius:2px;background:var(--edge)}
-.Q .o{background:var(--b)}
+.Q i{flex:1;height:4px;border-radius:2px;background:var(--s2)}
 .C{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.C button,.L button,.M{box-shadow:inset 0 0 0 1px var(--edge);border-radius:13px;padding:9px 12px;min-width:0}
-.C b{margin-top:2px}
-.M{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px}
-.M div{width:100%;height:6px;border-radius:3px;background:var(--track);overflow:hidden}
-.M i{display:block;height:100%;border-radius:3px;background:var(--b)}
+.C button,.L button,.M{background:var(--s);border-radius:14px;padding:10px 12px;min-width:0}
+.C small{display:flex;align-items:center;gap:5px}
+.j{color:var(--c);flex:none}
+.j svg{width:15px;height:15px}
+.C b{margin-top:4px}
+.M{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px}
+.M div{width:100%;height:6px;border-radius:3px;background:var(--s2)}
+.M i{display:block;height:100%;border-radius:3px}
 .M .high{background:var(--d)}
 .L{display:flex;flex-direction:column;gap:6px}
-.L button{display:flex;align-items:center;gap:10px;width:100%;min-height:calc(2.25em + 14px);padding:6px 12px}
-.L b{line-height:1.25em}
-.L small{line-height:1.25em;min-height:1.25em}
+.L button{display:flex;align-items:center;gap:10px;width:100%;min-height:calc(2.25em + 16px);padding:7px 12px}
+.L b,.L small{line-height:1.25em;min-height:1.25em}
 .L .o{box-shadow:inset 0 0 0 1.5px var(--b)}
-.L.plain button{box-shadow:none}
-.K{width:22px;height:22px;border-radius:11px;border:2px solid var(--h);flex:none;text-align:center;font-size:.72em;font-weight:700;line-height:18px;color:var(--check)}
+.K{width:22px;height:22px;border-radius:11px;border:2px solid var(--h);flex:none;text-align:center;font-size:.72em;font-weight:700;line-height:18px;color:#fff}
 .K2,.K3{border-radius:7px}
 .K1,.K3{border-color:var(--b);background:var(--b)}
-.K4{border:1px solid var(--edge);color:var(--h);line-height:20px}
-.V{color:var(--h);font-size:1.2em}
-.E{text-align:center;color:var(--h);padding:10px 0}
-.E div{font-size:2.2em;animation:w 2s ease-in-out infinite alternate}
+.K4{border:0;background:var(--s2);color:inherit;line-height:22px}
+.V{color:var(--h)}
+.E svg{width:34px;height:34px}
 .W{display:flex;gap:6px;justify-content:center;padding:6px}
-.W i{width:8px;height:8px;border-radius:4px;background:var(--b);animation:w .6s ease-in-out infinite alternate;animation-delay:calc(var(--i)*.15s)}
+.W i{width:8px;height:8px;border-radius:4px;animation:w .6s ease-in-out infinite alternate;animation-delay:calc(var(--i)*.15s)}
 p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .G{display:flex;align-items:center;justify-content:center;gap:10px}
-.G button{width:30px;height:30px;border-radius:15px;text-align:center;font-size:1.2em;line-height:28px}
-.G button:disabled{color:var(--h)}
-.G i{width:6px;height:6px;border-radius:3px;background:var(--edge)}
-.G .o{width:16px;background:var(--b)}
+button:disabled{color:var(--h)}
+.G i{width:6px;height:6px;border-radius:3px;background:var(--s2)}
+.G .o{width:16px}
+.Q .o,.G .o,.M i,.W i{background:var(--b)}
 .A{display:flex;gap:8px}
-.A button{display:flex;align-items:center;justify-content:center;flex:1;min-width:0;height:42px;line-height:1.2em;text-align:center;padding:0 6px;border-radius:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:inset 0 0 0 1px var(--edge)}
-.A .A0{flex:2;background:#2563eb;color:#fff;box-shadow:none}
+.A button{flex:1;min-width:0;height:42px;line-height:42px;text-align:center;padding:0 6px;border-radius:13px;font-weight:600;background:var(--s)}
+.A .A0{flex:2;background:var(--b);color:var(--tg-theme-button-text-color)}
 .A .A2{color:var(--d)}
-.A .A3{background:#00a63c;color:#fff;box-shadow:none}
-.F{text-align:center;color:var(--h);font-size:.82em;margin:0}
-#o{display:none;position:absolute;right:12px;top:14px;max-width:min(36vw,140px);color:var(--b);font-size:.78em;line-height:1.4em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}
+.A .A3{background:var(--g);color:#fff}
+.F{text-align:center;color:var(--h);font-size:.82em}
+#o{display:none;position:absolute;right:12px;top:14px;max-width:min(36vw,140px);color:var(--b);font-size:.78em;line-height:1.4em}
 #o.message{display:block}
 #o.N1{color:var(--g)}
 #o.N2{color:var(--d)}
 .busy .H .T b::after{content:'';position:absolute;right:0;top:50%;margin-top:-7px;width:14px;height:14px;border:2px solid var(--h);border-top-color:transparent;border-radius:50%;animation:r .7s linear infinite}
-.Z{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;padding:8px 0}
-.Z>div{display:flex;flex:none}
-.Z .T{flex:none;width:100%;text-align:center}
-.Z svg{width:48px;height:48px;fill:none;stroke:var(--h);stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.E,.Z{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;padding:8px 0}
+.E{color:var(--h)}
+.Z .T{flex:none;width:100%}
+.Z svg{width:48px;height:48px;stroke:var(--h);stroke-width:1.8}
 .Z1 svg{stroke:var(--g)}
 .Z2 svg{stroke:var(--d)}
 @keyframes q{50%{transform:scale(1.7)}}
@@ -165,9 +174,10 @@ p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 </style>
 <div id="a"></div><p id="o"></p>
 <script>
-var W=window.TelegramWidget,A=document.getElementById('a'),O=document.getElementById('o'),busy=0,last,tm,note,closed;
-var E={NOT_ALLOWED:'这个面板不能操作，请重新发送命令',BUSY:'上一个操作还在处理',RATE_LIMITED:'操作太快，请稍后再试',TIMEOUT:'机器人没有响应，请稍后重试'};
-var S=['M12 20h16','M12 21l6 6 11-13','M14 14l12 12M26 14l-12 12'];
+var W=window.TelegramWidget,A=document.getElementById('a'),O=document.getElementById('o'),busy=0,last,tm,note,closed,pend,tw;
+var E={NOT_ALLOWED:'面板已失效，请重新发送命令',BUSY:'上个操作还在处理',RATE_LIMITED:'操作太快，请稍后再试',TIMEOUT:'机器人无响应，请稍后再试'};
+var C='M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',S=['M8 12h8','M8 12l3 3 5-6','M9 9l6 6m0-6-6 6'];
+function sv(d){return'<svg viewBox="0 0 24 24"><path d="'+d+'"/></svg>'}
 function el(t,c,x,p){
 var e=p&&p.children[p._n++];
 if(!e||e.tagName.toLowerCase()!=t){var old=e;e=document.createElement(t);if(p){p.insertBefore(e,old||null);if(old)old.remove()}}
@@ -176,43 +186,45 @@ if(x!=null){if(e.textContent!=String(x))e.textContent=x}else if(e._leaf)e.textCo
 e._leaf=x!=null;return e
 }
 function trim(p){if(p._leaf)return;while(p.children.length>p._n)p.lastElementChild.remove();Array.from(p.children).forEach(trim)}
-function say(m){m=closed||busy?'':String(m||'').replace(/\\p{P}+/gu,' ').replace(/\\s+/g,' ').trim();O.textContent=m;O.title=m;O.className=m?'message'+(note?' N'+note[0]:''):'';A.style.setProperty('--notice-space',m?'min(36vw,140px)':'24px')}
+function say(m){m=closed||busy?'':String(m||'').replace(/\\p{P}+/gu,' ').replace(/\\s+/g,' ').trim();O.textContent=m;O.className=m?'message'+(note?' N'+note[0]:''):'';A.style.setProperty('--ns',m?'min(36vw,140px)':'24px')}
+var G={panel:['#55e','M4 4h16v16H4zm8 0v16M4 12h16'],folder:['#f90','M3 5h6l2 2h10v12H3z'],chat:['#08f','M4 5h16v11H9l-5 4z'],model:['#85f','M7 7h10v10H7zm5-4v4m0 10v4M3 12h4m10 0h4'],spark:['#e48','M13 3 5 14h6l-1 7 8-11h-6z'],shield:['#1a5','M12 3l8 3v6c0 5-4 8-8 9-4-1-8-4-8-9V6zm-3 9 2 2 4-4'],ask:['#08f',C+'m-2 7a2 2 0 1 1 3 1.7c-.6.4-1 .8-1 1.6m0 3v.1']};
+function ic(n,c,p){var g=G[n],e=el('span',c,g?null:n,p);e.style.setProperty('--c',g?g[0]:'');if(g){e.innerHTML=sv(g[1]);e._leaf=1}return e}
 function buzz(f,x){try{W.HapticFeedback[f](x)}catch(e){}}
-function done(){busy=0;A.className=''}
-function failed(e){done();say(E[e&&e.code]||'请求失败，请重试');buzz('notificationOccurred','error')}
+function done(m){clearTimeout(tw);pend=busy=0;A.className='';say(m||(note&&note[1]))}
+function failed(e){done(E[e&&e.code]||'请求失败，请重试');buzz('notificationOccurred','error')}
 function tap(d){
-if(busy)return;busy=1;A.className='busy';say();buzz('impactOccurred','light');
-try{W.request(d).then(function(r){done();say(r.result||(note&&note[1]))},failed)}catch(e){failed(e)}
+if(busy)return;busy=1;A.className='busy';say();buzz('impactOccurred','light');var at=last;
+try{W.request(d).then(function(r){r.result||last!=at?done(r.result):tw=setTimeout(done,pend=3e3)},failed)}catch(e){failed(e)}
 }
 function btn(c,p,d){var b=el('button',c,null,p);b.disabled=!d;b.onclick=d?function(){tap(d)}:null;return b}
 function two(n){return(n<10?'0':'')+n}
-function clock(e,x,t){function f(){var n=Math.max(0,Math.floor(Date.now()/1000)-t);e.textContent=x+' '+two(Math.floor(n/60))+':'+two(n%60)}f();tm=setInterval(f,1000)}
+function clock(e,x,t){function f(){var n=Math.max(0,Date.now()/1e3-t|0);e.textContent=x+' '+two(n/60|0)+':'+two(n%60)}f();tm=setInterval(f,1e3)}
 function draw(){
 if(W.chatData===last)return;
-last=W.chatData;clearInterval(tm);
+last=W.chatData;clearInterval(tm);pend&&done();
 var s=null,x,r,b,t,k;
 try{s=JSON.parse(last)}catch(e){}
 if(!s)s={z:[0,'面板已失效','请重新发送命令']};
 k=s.k||'';A._n=0;A.className=busy?'busy':'';note=s.n;closed=!!s.z;say(note&&note[1]);
 if(x=s.z){
 r=el('div','Z Z'+x[0],null,A);
-t=el('div','',null,r);t.innerHTML='<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="17"/><path d="'+S[x[0]]+'"/></svg>';t._leaf=true;
+t=el('div','',null,r);t.innerHTML=sv(C+S[x[0]]);t._leaf=true;
 b=el('span','T',null,r);el('b','',x[1],b);if(x[2])el('small','',x[2],b);trim(A);return
 }
 if(x=s.h){
 r=el('div','H',null,A);
 if(x[3])btn('B',r,k+x[3]).textContent='‹';
-el('div','I',x[0],r);b=el('div','T',null,r);el('b','',x[1],b);
+ic(x[0],'I',r);b=el('div','T',null,r);el('b','',x[1],b);
 if(t=s.s){
 b=el('small','P'+(t[0]==1?' live':t[0]==2?' y':''),null,b);el('u','',null,b);b=el('span','',t[1],b);
 if(t[2])clock(b,t[1],t[2])
 }else el('small','',x[2]||' ',b)
 }
 if(x=s.q){r=el('div','Q',null,A);for(t=0;t<x[1];t++)el('i',t<=x[0]?'o':'',null,r)}
-if(s.c){r=el('div','C',null,A);s.c.forEach(function(x){b=btn('',r,x[3]&&k+x[3]);el('small','',x[0]+' '+x[1],b);el('b','',x[2],b)})}
+if(s.c){r=el('div','C',null,A);s.c.forEach(function(x){b=btn('',r,x[3]&&k+x[3]);t=el('small','',null,b);ic(x[0],'j',t);el('span','',x[1],t);el('b','',x[2],b)})}
 if(x=s.m){r=el('div','M',null,A);el('small','',x[1],r);el('small','',x[2],r);b=el('i',x[0]>84?'high':'',null,el('div','',null,r));b.style.width=Math.max(2,Math.min(100,x[0]))+'%'}
 if(s.l){
-r=el('div','L'+(s.r?' plain':''),null,A);
+r=el('div','L',null,A);
 s.l.forEach(function(x,i){
 var m=x[3]||0;b=btn(m==1||m==3?'o':'',r,x[2]&&k+x[2]);
 el('span','K K'+m,m==4?i+1:m==1||m==3?'✓':'',b);
@@ -220,7 +232,7 @@ t=el('span','X',null,b);el('b','',x[0],t);if(x[1])el('small','',x[1],t);
 if(m<2)el('span','V','›',b)
 })
 }
-if(x=s.e){r=el('div','E',null,A);el('div','',x[0],r);el('small','',x[1],r)}
+if(x=s.e){r=el('div','E',null,A);ic(x[0],'',r);el('small','',x[1],r)}
 if(s.t)el('p','',s.t,A);
 if(s.w){r=el('div','W',null,A);for(t=0;t<3;t++)el('i','',null,r).style.setProperty('--i',t)}
 if(x=s.p){

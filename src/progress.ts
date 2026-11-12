@@ -8,11 +8,41 @@ import { withLocalMediaPlaceholders } from './media.js'
 import { richBody, TelegramTranscript } from './transcript.js'
 
 const LONG_PREVIEW = '回复较长，完整内容将在生成完成后显示。'
+const FOLD_PREVIEW = '折叠内容将在生成完成后显示。'
+
+/**
+ * Shortest time from the start of one draft update to the start of the next.
+ * The update in flight already spaces them by a Bot API round trip (about half
+ * a second through a distant proxy); a 429 answer backs off further.
+ */
+const DRAFT_INTERVAL_MS = 600
+
+/**
+ * Where the text's first disclosure that is still open (or a stray summary)
+ * begins, or -1. Closed `<details>` blocks are complete rich syntax.
+ */
+function openFold(text: string): number {
+  let depth = 0
+  let start = -1
+  for (const match of text.matchAll(/<(\/?)(details|summary)\b[^>]*>/gi)) {
+    if (match[2]!.toLowerCase() === 'summary') {
+      if (depth === 0) return start === -1 ? match.index : start
+    } else if (match[1]) {
+      if (depth > 0 && --depth === 0) start = -1
+    } else if (depth++ === 0) {
+      start = match.index
+    }
+  }
+  return start
+}
 
 function previewText(text: string, overflow: boolean): string {
-  return overflow ? LONG_PREVIEW
-    : /<\/?(?:details|summary)\b/i.test(text) ? '折叠内容将在生成完成后显示。'
-    : text
+  if (overflow) return LONG_PREVIEW
+  const fold = openFold(text)
+  // A tag still being typed at the end would show as text for one update.
+  const visible = (fold === -1 ? text : text.slice(0, fold)).replace(/<\/?[a-z]*$/i, '')
+  if (fold === -1) return visible
+  return visible.trim() ? `${visible.trimEnd()}\n\n${FOLD_PREVIEW}` : FOLD_PREVIEW
 }
 
 /**
@@ -47,6 +77,8 @@ export class TelegramProgress {
   private dirty = true
   private nextSend = 0
   private lastSent = 0
+  /** Sends the latest text once {@link nextSend} passes, when no new chunk does. */
+  private followUp: NodeJS.Timeout | undefined
 
   constructor(
     private readonly client: TelegramClientLike,
@@ -196,6 +228,7 @@ export class TelegramProgress {
     this.disposed = true
     this.pause()
     clearInterval(this.timer)
+    clearTimeout(this.followUp)
     this.abort.abort()
   }
 
@@ -237,12 +270,13 @@ export class TelegramProgress {
     this.scheduled = true
     const epoch = this.epoch
     void this.enqueue(async () => {
+      const started = Date.now()
       try {
         if (this.disposed || this.paused || epoch !== this.epoch || this.signal.aborted) return
         this.dirty = false
         await this.send()
         this.lastSent = Date.now()
-        this.nextSend = Date.now() + 1200
+        this.nextSend = started + DRAFT_INTERVAL_MS
       } catch (error) {
         if (this.signal.aborted) return
         this.dirty = true
@@ -250,7 +284,7 @@ export class TelegramProgress {
           const delay = Number.isFinite(error.retryAfter) ? Math.max(1, error.retryAfter!) : 5
           this.nextSend = Date.now() + delay * 1000
         } else if (/not modified/i.test(String(error))) {
-          this.nextSend = Date.now() + 1200
+          this.nextSend = started + DRAFT_INTERVAL_MS
         } else {
           this.nextSend = Date.now() + 5000
           this.warn(error)
@@ -259,6 +293,10 @@ export class TelegramProgress {
         this.scheduled = false
         // Superseded by a real message or a new draft: follow up right away.
         if (epoch !== this.epoch) this.schedule()
+        else if (this.dirty && !this.disposed) {
+          clearTimeout(this.followUp)
+          this.followUp = setTimeout(() => this.schedule(), Math.max(0, this.nextSend - Date.now()))
+        }
       }
     })
   }

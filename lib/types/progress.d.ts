@@ -41,6 +41,8 @@ export declare class TelegramProgress {
     private dirty;
     private nextSend;
     private lastSent;
+    /** Sends the latest text once {@link nextSend} passes, when no new chunk does. */
+    private followUp;
     constructor(client: TelegramClientLike, chatId: number, 
     /** Aborted when the bridge stops; real messages outlive the turn's draft. */
     stopSignal: AbortSignal, enqueue: (task: () => Promise<void>) => Promise<void>, warn: (error: unknown) => void, 

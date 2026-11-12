@@ -90,5 +90,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.client.json"
   },
-  "icon": "./icon.svg"
+  "icon": "./icon.svg",
+  "dependencies": {
+    "undici": "^7.30.2"
+  }
 }
