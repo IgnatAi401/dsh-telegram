@@ -43,6 +43,8 @@ export const Config = Schema.object({
   allowAllUsers: Schema.boolean(),
   preset: Schema.string().min(1),
   pollingTimeoutSec: Schema.natural().min(1).default(30),
+  // `auto` falls back to inline buttons while Telegram refuses widgets and switches back on its own.
+  panelMode: Schema.union(['auto', 'widget', 'keyboard']).default('auto'),
   apiBaseUrl: Schema.string().pattern(/^https?:\/\//),
   resultCacheDirectory: Schema.string().min(1),
 })

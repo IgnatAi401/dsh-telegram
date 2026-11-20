@@ -43,6 +43,7 @@ import { escapeHtml } from './format.js'
 import { localMediaKind, localMediaPath, mediaLink, mediaPlaceholder, rewriteMarkdownImages } from './media.js'
 import type { LocalMediaKind, MarkdownImage } from './media.js'
 import { encodePanel, PANEL_HTML } from './panel.js'
+import { renderKeyboardPanel } from './panel-keyboard.js'
 import type { Panel, PanelButton, PanelRow } from './panel.js'
 import { TelegramProgress } from './progress.js'
 import { TelegramResultCache } from './result-cache.js'
@@ -72,7 +73,18 @@ export interface TelegramBridgeOptions {
   client?: TelegramClientLike
   /** Delay seam; tests substitute an instant sleep. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+  /**
+   * How panels (menu, questions, approvals) are drawn: `auto` sends widgets and
+   * falls back to inline keyboards while Telegram refuses them, `widget` and
+   * `keyboard` force one form. Defaults to `auto`.
+   */
+  panelMode?: PanelMode
+  /** Clock seam in milliseconds; tests substitute a fake. */
+  now?: () => number
 }
+
+/** How bridge panels are drawn; see {@link TelegramBridgeOptions.panelMode}. */
+export type PanelMode = 'auto' | 'widget' | 'keyboard'
 
 /** One tap inside a panel widget. */
 interface PanelInteraction {
@@ -353,6 +365,10 @@ const POLL_CADENCE_MS = 50
 const MENU_PAGE_SIZE = 6
 /** A widget must answer within 15 seconds; answer early when an action runs longer. */
 const WIDGET_ANSWER_DEADLINE_MS = 10000
+/** After Telegram refuses a widget, panels are inline keyboards until this long has passed. */
+const WIDGET_RETRY_MS = 6 * 60 * 60 * 1000
+/** Keyboard panels remembered for later edits; older ones are only ever expired menus. */
+const MAX_KEYBOARD_PANELS = 500
 const EXPIRED_PANEL: Panel = { closed: { kind: 'neutral', title: '面板已过期', text: '发送 /menu 打开新面板' } }
 const MAX_FILE_BYTES = 20 * 1024 * 1024
 /** Bot API uploads accept files of up to 50 MB (52428800 bytes). */
@@ -454,6 +470,14 @@ function errorCode(error: unknown): string | undefined {
 /** True when Telegram rejected an edit only because the content is unchanged. */
 function isNotModified(error: unknown): boolean {
   return /not modified/i.test(messageOf(error))
+}
+
+/**
+ * True when Telegram refuses widgets for this bot or chat, as it has for
+ * general bots since 2026-11-13; never for a malformed widget.
+ */
+function isWidgetRefused(error: unknown): boolean {
+  return /INPUT_MEDIA_WIDGET_NOT_ALLOWED/i.test(messageOf(error))
 }
 
 /** True when an edit/delete target is known not to exist anymore. */
@@ -653,6 +677,12 @@ export class TelegramBridge {
   private readonly allowAllUsers: boolean
   private readonly preset: string | undefined
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
+  private readonly now: () => number
+  private readonly panelMode: PanelMode
+  /** When Telegram last refused a widget, while panels fall back to inline keyboards. */
+  private widgetsRefusedAt: number | undefined
+  /** Panels sent as inline keyboards, as `chatId:messageId`; every other panel is a widget. */
+  private readonly keyboardPanels = new Set<string>()
   private readonly resultCache: TelegramResultCache
   private readonly chats = new Map<number, ChatState>()
   private readonly chatsBySession = new Map<string, ActiveChatSession>()
@@ -700,6 +730,8 @@ export class TelegramBridge {
     this.allowedUserIds = new Set(allowedUserIds)
     this.allowAllUsers = options.allowAllUsers ?? false
     this.preset = options.preset?.trim() || undefined
+    this.now = options.now ?? Date.now
+    this.panelMode = options.panelMode ?? 'auto'
     this.resultCache = new TelegramResultCache(options.token, options.resultCacheDirectory)
     this.sleep = options.sleep ?? ((ms, signal) => new Promise((resolve) => {
       const timer = setTimeout(resolve, ms)
@@ -1426,19 +1458,19 @@ export class TelegramBridge {
         pager,
       }
     }
-    const chatData = encodePanel({ ...panel, prefix: `menu:${token}:`, ...(notice === undefined ? {} : { notice }) })
+    const shown: Panel = { ...panel, prefix: `menu:${token}:`, ...(notice === undefined ? {} : { notice }) }
     const old = this.menus.get(chatId)
     const send = async (): Promise<number> => {
       const started = performance.now()
-      const sent = await this.client.sendWidget(chatId, { html: PANEL_HTML, chatData }, this.abortController.signal)
+      const sent = await this.sendPanel(chatId, shown)
       this.tapPhase(chatId, 'send', started)
-      return sent.message_id
+      return sent
     }
     if (messageId === undefined) {
       messageId = await send()
     } else {
       try {
-        await this.writePanel(chatId, messageId, chatData)
+        await this.writePanel(chatId, messageId, shown)
       } catch (error) {
         // The user deleted the panel: a tap or /menu deserves a fresh one.
         if (!resend || !isMissingMessage(error)) throw error
@@ -1450,10 +1482,10 @@ export class TelegramBridge {
     if (old !== undefined && old.messageId !== messageId) await this.editWidget(chatId, old.messageId, EXPIRED_PANEL)
   }
 
-  /** Replace a widget's state; an unchanged or deleted panel is not an error. */
+  /** Replace a panel's content; an unchanged or deleted panel is not an error. */
   private async editWidget(chatId: number, messageId: number, panel: Panel): Promise<void> {
     try {
-      await this.writePanel(chatId, messageId, encodePanel(panel))
+      await this.writePanel(chatId, messageId, panel)
     } catch (error) {
       if (!this.stopped && !isNotModified(error) && !isMissingMessage(error)) {
         this.ctx.logger.warn('[telegram] panel update failed: %s', messageOf(error))
@@ -1462,15 +1494,68 @@ export class TelegramBridge {
   }
 
   /**
-   * Write a bridge panel's state. A tap on that panel is answered in parallel
-   * instead of after the write, so the user waits one round trip, not two.
+   * Send a bridge panel as a widget, or as a rich message with inline buttons
+   * while Telegram refuses widgets. In `auto` mode a refusal switches every
+   * panel to buttons; a widget is tried again after {@link WIDGET_RETRY_MS} and
+   * whenever the bridge restarts, so panels return once Telegram allows them.
+   * @returns the panel's message id.
    */
-  private async writePanel(chatId: number, messageId: number, chatData: string): Promise<void> {
+  private async sendPanel(chatId: number, panel: Panel, signal = this.abortController.signal): Promise<number> {
+    if (this.widgetsWanted()) {
+      try {
+        const sent = await this.client.sendWidget(chatId, { html: PANEL_HTML, chatData: encodePanel(panel) }, signal)
+        this.noteWidgetAccepted()
+        return sent.message_id
+      } catch (error) {
+        if (this.panelMode !== 'auto' || !isWidgetRefused(error)) throw error
+        this.noteWidgetRefused(error)
+      }
+    }
+    const { markdown, keyboard } = renderKeyboardPanel(panel)
+    const sent = await this.client.sendRichMessage(chatId, markdown, signal, keyboard)
+    this.keyboardPanels.add(`${chatId}:${sent.message_id}`)
+    if (this.keyboardPanels.size > MAX_KEYBOARD_PANELS) this.keyboardPanels.delete(this.keyboardPanels.values().next().value!)
+    return sent.message_id
+  }
+
+  /** Whether the next panel tries a widget first. */
+  private widgetsWanted(): boolean {
+    if (this.panelMode !== 'auto') return this.panelMode === 'widget'
+    return this.widgetsRefusedAt === undefined || this.now() - this.widgetsRefusedAt >= WIDGET_RETRY_MS
+  }
+
+  private noteWidgetRefused(error: unknown): void {
+    if (this.panelMode !== 'auto') return
+    if (this.widgetsRefusedAt === undefined) {
+      this.ctx.logger.warn('[telegram] Telegram refused a widget (%s); panels use inline buttons and widgets are retried every %d hours',
+        messageOf(error), WIDGET_RETRY_MS / 3600000)
+    }
+    this.widgetsRefusedAt = this.now()
+  }
+
+  private noteWidgetAccepted(): void {
+    if (this.widgetsRefusedAt === undefined) return
+    this.widgetsRefusedAt = undefined
+    this.ctx.logger.info('[telegram] Telegram accepts widgets again; panels are widgets again')
+  }
+
+  /**
+   * Write a bridge panel's new content in the form it was sent. A tap on that
+   * panel is answered in parallel instead of after the write, so the user
+   * waits one round trip, not two.
+   */
+  private async writePanel(chatId: number, messageId: number, panel: Panel): Promise<void> {
     const tap = this.taps.get(chatId)
     if (tap?.messageId === messageId) tap.answerEarly()
     const started = performance.now()
+    const key = `${chatId}:${messageId}`
     try {
-      await this.client.editMessageWidgetData(chatId, messageId, chatData, this.abortController.signal)
+      if (this.keyboardPanels.has(key)) {
+        const { markdown, keyboard } = renderKeyboardPanel(panel)
+        await this.client.editRichMessage(chatId, messageId, markdown, this.abortController.signal, keyboard)
+      } else {
+        await this.client.editMessageWidgetData(chatId, messageId, encodePanel(panel), this.abortController.signal)
+      }
     } finally {
       this.tapPhase(chatId, 'edit', started)
     }
@@ -1645,14 +1730,22 @@ export class TelegramBridge {
     // Any bot message clears Telegram's draft; later previews continue in a fresh one.
     chat.progress?.interrupt()
     const sendSignal = AbortSignal.any([signal, this.abortController.signal])
-    const message = await this.inChatOrder(chat, () => this.client.sendWidget(chat.chatId, {
-      html: request.html,
-      chatData: request.data ?? '',
-      caption: request.caption,
-      allowQueries: false,
-      ...(request.width === undefined ? {} : { width: request.width }),
-      ...(request.height === undefined ? {} : { height: request.height }),
-    }, sendSignal))
+    let message: TelegramMessage
+    try {
+      message = await this.inChatOrder(chat, () => this.client.sendWidget(chat.chatId, {
+        html: request.html,
+        chatData: request.data ?? '',
+        caption: request.caption,
+        allowQueries: false,
+        ...(request.width === undefined ? {} : { width: request.width }),
+        ...(request.height === undefined ? {} : { height: request.height }),
+      }, sendSignal))
+    } catch (error) {
+      if (!isWidgetRefused(error)) throw error
+      this.noteWidgetRefused(error)
+      throw new Error(`Telegram 目前不允许这个机器人发送小组件（${messageOf(error)}）。请改用普通消息回复，本轮不要再调用 ${WIDGET_TOOL_NAME}。`)
+    }
+    this.noteWidgetAccepted()
     chat.widgetMessageIds.add(message.message_id)
     return message.message_id
   }
@@ -2057,17 +2150,39 @@ export class TelegramBridge {
     void this.safeSend(pending.chatId, '⏳ **等待回答已超时**\n\nAgent 已继续工作；你仍可回答上面的问题，回答会作为新消息发送给 Agent。发送 /cancel 可放弃回答。')
   }
 
-  /** Inline keyboards belong to panels sent before the widget redesign; nothing uses them now. */
+  /** A tap on an inline-keyboard panel, sent while Telegram refuses widgets. */
   private async handleCallbackQuery(callback: TelegramCallbackQuery): Promise<void> {
-    await this.safeAnswerCallback(callback.id, '这个按钮已停用，请发送 /menu 打开新面板。')
+    const message = callback.message
+    await this.handlePanelTap({
+      kind: 'button',
+      chatId: message?.chat.type === 'private' ? message.chat.id : undefined,
+      messageId: message?.message_id,
+      from: callback.from,
+      data: callback.data ?? '',
+    }, text => this.client.answerCallbackQuery(callback.id, text, undefined, this.abortController.signal))
+  }
+
+  /** A tap inside a panel widget. */
+  private async handleWidgetQuery(query: TelegramWidgetQuery): Promise<void> {
+    await this.handlePanelTap({
+      kind: 'widget',
+      chatId: query.chat?.type === 'private' ? query.chat.id : undefined,
+      messageId: query.message_id,
+      from: query.from,
+      data: query.data,
+    }, text => this.client.answerWidgetQuery(query.id, text, this.abortController.signal))
   }
 
   /**
-   * Handle one tap inside a panel widget. The answer is sent after the handler
-   * has changed the panel, so the widget unlocks its buttons on the new state;
-   * a slow action is answered early, since Telegram allows 15 seconds.
+   * Handle one panel tap. The answer is sent after the handler has changed the
+   * panel, so a widget unlocks its buttons on the new state; a slow action is
+   * answered early, since Telegram allows 15 seconds.
+   * @param send - acknowledge the tap with an optional short text.
    */
-  private async handleWidgetQuery(query: TelegramWidgetQuery): Promise<void> {
+  private async handlePanelTap(
+    tap: { kind: 'widget' | 'button', chatId: number | undefined, messageId: number | undefined, from: TelegramUser | undefined, data: string },
+    send: (text: string | undefined) => Promise<unknown>,
+  ): Promise<void> {
     const started = performance.now()
     const phases: string[] = []
     let text: string | undefined
@@ -2076,30 +2191,30 @@ export class TelegramBridge {
       clearTimeout(timer)
       const answerStarted = performance.now()
       try {
-        await this.client.answerWidgetQuery(query.id, text === undefined ? undefined : truncateText(text, 200), this.abortController.signal)
+        await send(text === undefined ? undefined : truncateText(text, 200))
       } catch (error) {
-        if (!this.stopped) this.ctx.logger.warn('[telegram] widget acknowledgement failed: %s', messageOf(error))
+        if (!this.stopped) this.ctx.logger.warn('[telegram] %s acknowledgement failed: %s', tap.kind, messageOf(error))
       }
       phases.push(`answer ${Math.round(performance.now() - answerStarted)}ms`)
     })()
     const timer = setTimeout(() => { void flush() }, WIDGET_ANSWER_DEADLINE_MS)
-    const chatId = query.chat?.id
+    const { chatId, messageId } = tap
     try {
-      if (query.chat?.type !== 'private' || query.message_id === undefined || chatId === undefined) text = '这个面板不可用。'
-      else if (!this.authorizedUser(query.from)) text = '⛔ 访问被拒绝'
+      if (messageId === undefined || chatId === undefined) text = '这个面板不可用。'
+      else if (!this.authorizedUser(tap.from)) text = '⛔ 访问被拒绝'
       else {
-        this.taps.set(chatId, { messageId: query.message_id, phases, answerEarly: () => { void flush() } })
+        this.taps.set(chatId, { messageId, phases, answerEarly: () => { void flush() } })
         await this.handleInteraction({
           chatId,
-          messageId: query.message_id,
-          data: query.data,
+          messageId,
+          data: tap.data,
           answer: async (message) => { text = message ?? text },
         })
       }
     } finally {
       if (chatId !== undefined) this.taps.delete(chatId)
       await flush()
-      this.ctx.logger.info('[telegram] panel tap %s: %dms (%s)', query.data.split(':', 1)[0],
+      this.ctx.logger.info('[telegram] panel %s tap %s: %dms (%s)', tap.kind, tap.data.split(':', 1)[0],
         Math.round(performance.now() - started), phases.join(', ') || 'no Bot API calls')
     }
   }
@@ -2165,11 +2280,9 @@ export class TelegramBridge {
     const signal = this.questionSignal(pending)
     const question = await this.client.sendRichMessage(pending.chatId, this.formatQuestion(pending), signal)
     this.trackQuestionMessage(pending, question.message_id)
-    const sent = await this.client.sendWidget(pending.chatId, {
-      html: PANEL_HTML, chatData: encodePanel(this.questionPanel(pending)),
-    }, signal)
-    this.trackQuestionMessage(pending, sent.message_id)
-    pending.panelMessageId = sent.message_id
+    const sent = await this.sendPanel(pending.chatId, this.questionPanel(pending), signal)
+    this.trackQuestionMessage(pending, sent)
+    pending.panelMessageId = sent
     if (pending.settled) await this.closeQuestionPanel(pending, { kind: 'neutral', title: '提问已结束' })
   }
 
@@ -2558,16 +2671,6 @@ export class TelegramBridge {
   private stopTyping(chat: ActiveChatSession): void {
     clearInterval(chat.typingTimer)
     chat.typingTimer = undefined
-  }
-
-  /** Callback acknowledgements are best-effort but never omitted. */
-  private async safeAnswerCallback(callbackId: string, text?: string, showAlert?: boolean): Promise<void> {
-    try {
-      await this.client.answerCallbackQuery(callbackId, text === undefined ? undefined : truncateText(text, 200),
-        showAlert, this.abortController.signal)
-    } catch (error) {
-      if (!this.stopped) this.ctx.logger.warn('[telegram] callback acknowledgement failed: %s', messageOf(error))
-    }
   }
 
   /** Fixed notices use the same native Rich Markdown transport as assistant replies. */

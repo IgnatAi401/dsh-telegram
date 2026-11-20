@@ -27,7 +27,17 @@ export interface TelegramBridgeOptions {
     client?: TelegramClientLike;
     /** Delay seam; tests substitute an instant sleep. */
     sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    /**
+     * How panels (menu, questions, approvals) are drawn: `auto` sends widgets and
+     * falls back to inline keyboards while Telegram refuses them, `widget` and
+     * `keyboard` force one form. Defaults to `auto`.
+     */
+    panelMode?: PanelMode;
+    /** Clock seam in milliseconds; tests substitute a fake. */
+    now?: () => number;
 }
+/** How bridge panels are drawn; see {@link TelegramBridgeOptions.panelMode}. */
+export type PanelMode = 'auto' | 'widget' | 'keyboard';
 /**
  * Bridge between Telegram private chats and DSH sessions. One session per
  * chat; incoming content becomes a user message, and each turn is delivered
@@ -41,6 +51,12 @@ export declare class TelegramBridge {
     private readonly allowAllUsers;
     private readonly preset;
     private readonly sleep;
+    private readonly now;
+    private readonly panelMode;
+    /** When Telegram last refused a widget, while panels fall back to inline keyboards. */
+    private widgetsRefusedAt;
+    /** Panels sent as inline keyboards, as `chatId:messageId`; every other panel is a widget. */
+    private readonly keyboardPanels;
     private readonly resultCache;
     private readonly chats;
     private readonly chatsBySession;
@@ -113,11 +129,24 @@ export declare class TelegramBridge {
      * @param resend - send a new panel when the old message is gone.
      */
     private renderMenu;
-    /** Replace a widget's state; an unchanged or deleted panel is not an error. */
+    /** Replace a panel's content; an unchanged or deleted panel is not an error. */
     private editWidget;
     /**
-     * Write a bridge panel's state. A tap on that panel is answered in parallel
-     * instead of after the write, so the user waits one round trip, not two.
+     * Send a bridge panel as a widget, or as a rich message with inline buttons
+     * while Telegram refuses widgets. In `auto` mode a refusal switches every
+     * panel to buttons; a widget is tried again after {@link WIDGET_RETRY_MS} and
+     * whenever the bridge restarts, so panels return once Telegram allows them.
+     * @returns the panel's message id.
+     */
+    private sendPanel;
+    /** Whether the next panel tries a widget first. */
+    private widgetsWanted;
+    private noteWidgetRefused;
+    private noteWidgetAccepted;
+    /**
+     * Write a bridge panel's new content in the form it was sent. A tap on that
+     * panel is answered in parallel instead of after the write, so the user
+     * waits one round trip, not two.
      */
     private writePanel;
     /** Record how long one step of the chat's current panel tap took. */
@@ -195,14 +224,17 @@ export declare class TelegramBridge {
      * steered in through `userQuestions.answer`.
      */
     private continueTimedQuestion;
-    /** Inline keyboards belong to panels sent before the widget redesign; nothing uses them now. */
+    /** A tap on an inline-keyboard panel, sent while Telegram refuses widgets. */
     private handleCallbackQuery;
-    /**
-     * Handle one tap inside a panel widget. The answer is sent after the handler
-     * has changed the panel, so the widget unlocks its buttons on the new state;
-     * a slow action is answered early, since Telegram allows 15 seconds.
-     */
+    /** A tap inside a panel widget. */
     private handleWidgetQuery;
+    /**
+     * Handle one panel tap. The answer is sent after the handler has changed the
+     * panel, so a widget unlocks its buttons on the new state; a slow action is
+     * answered early, since Telegram allows 15 seconds.
+     * @param send - acknowledge the tap with an optional short text.
+     */
+    private handlePanelTap;
     /** Route one panel tap to the menu or to the waiting question. */
     private handleInteraction;
     /**
@@ -256,8 +288,6 @@ export declare class TelegramBridge {
     /** Keep Telegram's typing indicator alive while a turn runs (the action expires after ~5s). */
     private startTyping;
     private stopTyping;
-    /** Callback acknowledgements are best-effort but never omitted. */
-    private safeAnswerCallback;
     /** Fixed notices use the same native Rich Markdown transport as assistant replies. */
     private safeSend;
     private safeAction;

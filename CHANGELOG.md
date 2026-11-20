@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep `/menu`, questions and approvals working while Telegram refuses widgets: since 2026-11-13 Telegram answers `sendWidget` from general bots with `INPUT_MEDIA_WIDGET_NOT_ALLOWED`, which made every `/menu` fail. Such a panel is now sent as a rich message with inline buttons and works the same way (taps edit it in place). Later panels go straight to buttons. A widget is tried again every 6 hours and whenever the bridge restarts, so panels switch back once Telegram allows widgets again, with no update needed. Each switch is logged once. A new `panelMode` setting (`auto` by default, `keyboard`, or `widget`) forces one form. When the Agent's own `telegram_widget` is refused, the tool tells it to answer in plain text.
 - Fix every upload (files delivered with `present`, embedded images, videos and audio): since uploads moved to `undici` in 0.4.0, the form was sent as the text `[object FormData]` and Telegram answered `there is no document in the request`. Uploads now build their form with `undici`'s own `FormData`.
 
 ## 0.4.0

@@ -34,6 +34,7 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     allowAllUsers: Schema<boolean, boolean, "plain">;
     preset: Schema<string, string, "plain">;
     pollingTimeoutSec: Schema<number, number, "defined">;
+    panelMode: Schema<"auto" | "widget" | "keyboard", "auto" | "widget" | "keyboard", "defined">;
     apiBaseUrl: Schema<string, string, "plain">;
     resultCacheDirectory: Schema<string, string, "plain">;
 }>>, Schemastery.ObjectT<NoInfer<{
@@ -42,6 +43,7 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     allowAllUsers: Schema<boolean, boolean, "plain">;
     preset: Schema<string, string, "plain">;
     pollingTimeoutSec: Schema<number, number, "defined">;
+    panelMode: Schema<"auto" | "widget" | "keyboard", "auto" | "widget" | "keyboard", "defined">;
     apiBaseUrl: Schema<string, string, "plain">;
     resultCacheDirectory: Schema<string, string, "plain">;
 }>>, "plain">;
