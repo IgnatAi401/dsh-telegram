@@ -77,6 +77,8 @@ function blockPlain(value: unknown): string {
     case 'blockquote':
       return withCredit(quoted(richBlocksPlain(block.blocks)), block.credit)
     case 'expandable_blockquote':
+      // Bot API 10.5 replaced `text` with `blocks`; keep reading `text` from older servers.
+      return withCredit(quoted(Array.isArray(block.blocks) ? richBlocksPlain(block.blocks) : richTextPlain(block.text)), block.credit)
     case 'pullquote':
       return withCredit(quoted(richTextPlain(block.text)), block.credit)
     case 'table': {
