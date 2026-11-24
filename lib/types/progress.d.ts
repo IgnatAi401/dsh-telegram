@@ -1,6 +1,6 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
-import type { TelegramClientLike } from './client.js';
+import type { TelegramClientLike, TelegramTarget } from './client.js';
 /**
  * One turn's Telegram output while it runs. Intermediate assistant messages are
  * sent as temporary real messages, removed once the final message (folded
@@ -11,7 +11,7 @@ import type { TelegramClientLike } from './client.js';
  */
 export declare class TelegramProgress {
     private readonly client;
-    private readonly chatId;
+    private readonly chat;
     /** Aborted when the bridge stops; real messages outlive the turn's draft. */
     private readonly stopSignal;
     private readonly enqueue;
@@ -43,7 +43,7 @@ export declare class TelegramProgress {
     private lastSent;
     /** Sends the latest text once {@link nextSend} passes, when no new chunk does. */
     private followUp;
-    constructor(client: TelegramClientLike, chatId: number, 
+    constructor(client: TelegramClientLike, chat: TelegramTarget, 
     /** Aborted when the bridge stops; real messages outlive the turn's draft. */
     stopSignal: AbortSignal, enqueue: (task: () => Promise<void>) => Promise<void>, warn: (error: unknown) => void, 
     /** Record a temporary message for removal after final delivery. */

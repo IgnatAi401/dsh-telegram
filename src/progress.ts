@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TelegramApiError } from './client.js'
-import type { TelegramClientLike } from './client.js'
+import type { TelegramClientLike, TelegramTarget } from './client.js'
 import { escapeHtml } from './format.js'
 import { withLocalMediaPlaceholders } from './media.js'
 import { richBody, TelegramTranscript } from './transcript.js'
@@ -82,7 +82,7 @@ export class TelegramProgress {
 
   constructor(
     private readonly client: TelegramClientLike,
-    private readonly chatId: number,
+    private readonly chat: TelegramTarget,
     /** Aborted when the bridge stops; real messages outlive the turn's draft. */
     private readonly stopSignal: AbortSignal,
     private readonly enqueue: (task: () => Promise<void>) => Promise<void>,
@@ -180,7 +180,7 @@ export class TelegramProgress {
     this.newDraft()
     void this.enqueue(async () => {
       try {
-        this.track((await this.client.sendRichMessage(this.chatId, withLocalMediaPlaceholders(richBody(text)), this.stopSignal)).message_id)
+        this.track((await this.client.sendRichMessage(this.chat, withLocalMediaPlaceholders(richBody(text)), this.stopSignal)).message_id)
       } catch (error) {
         if (!this.stopSignal.aborted) this.warn(error)
       }
@@ -312,7 +312,7 @@ export class TelegramProgress {
   private async send(): Promise<void> {
     // One stable draft between real messages: replacing its ID makes Telegram
     // remove and recreate the preview on every update.
-    await this.client.sendRichMessageDraft(this.chatId, this.draftId,
+    await this.client.sendRichMessageDraft(this.chat, this.draftId,
       `<tg-thinking>${escapeHtml(this.status())}</tg-thinking>\n\n${this.preview()}`, this.signal)
   }
 }

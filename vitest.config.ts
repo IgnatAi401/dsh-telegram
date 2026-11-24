@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
@@ -15,6 +17,8 @@ export default defineConfig({
     }],
   },
   test: {
+    // Bridges that tests start without explicit paths must never touch the real ~/.dsh.
+    env: { DSH_HOME: join(tmpdir(), 'dsh-telegram-tests') },
     server: { deps: { inline: [/@deepseek-ai\/dsh-client-(ui-primitives|store)/] } },
   },
 })

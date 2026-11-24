@@ -23,6 +23,8 @@ export interface TelegramBridgeOptions {
     apiBaseUrl?: string;
     /** Result cache root; defaults to DSH_HOME/telegram-results. */
     resultCacheDirectory?: string;
+    /** Chat/topic → session bindings restored on start; defaults to DSH_HOME/telegram-bindings/<bot>.json. */
+    bindingsFile?: string;
     /** Client seam; tests substitute a fake. */
     client?: TelegramClientLike;
     /** Delay seam; tests substitute an instant sleep. */
@@ -33,6 +35,13 @@ export interface TelegramBridgeOptions {
      * `keyboard` force one form. Defaults to `auto`.
      */
     panelMode?: PanelMode;
+    /**
+     * Topic mode: each private-chat topic is one DSH session. On start the bridge
+     * turns topics on (with a sidebar; only the bot creates topics) through
+     * `setMySettings`; once it is off again, the next start restores the bot's
+     * earlier topic settings. The main chat then only creates topics.
+     */
+    privateTopics?: boolean;
     /** Clock seam in milliseconds; tests substitute a fake. */
     now?: () => number;
 }
@@ -53,15 +62,27 @@ export declare class TelegramBridge {
     private readonly sleep;
     private readonly now;
     private readonly panelMode;
+    private readonly privateTopics;
+    /** The bot's username, for links to its topics; read on start in topic mode. */
+    private botUsername;
+    /** Topics started from a main-chat message, by `chatId:messageId`, so one message never starts two. */
+    private readonly sourceTopics;
     /** When Telegram last refused a widget, while panels fall back to inline keyboards. */
     private widgetsRefusedAt;
     /** Panels sent as inline keyboards, as `chatId:messageId`; every other panel is a widget. */
     private readonly keyboardPanels;
+    /**
+     * The chat or topic each recent panel was sent to, by `chatId:messageId`: a
+     * `widget_query` may not say which topic its message is in.
+     */
+    private readonly panelTargets;
     private readonly resultCache;
+    private readonly bindingStore;
+    /** Per chat or topic, keyed by {@link targetKey}, like every per-chat map below. */
     private readonly chats;
     private readonly chatsBySession;
     private readonly collections;
-    /** Human-input requests keyed by Telegram chat id; at most one per chat. */
+    /** Human-input requests keyed by chat or topic ({@link targetKey}); at most one per chat or topic. */
     private readonly pendingQuestions;
     private readonly menus;
     /** Serialize background refreshes and navigation through the same per-chat queue. */
@@ -94,9 +115,31 @@ export declare class TelegramBridge {
     private stopImpl;
     /** Publish the slash-command list so Telegram's `/` menu matches the bot. */
     private registerCommands;
+    /**
+     * Topic mode on: remember the bot's topic settings (first time only), then
+     * switch topics, the sidebar, and bot-only topic creation on. Topic mode off
+     * after it was on: restore the remembered settings. Failures only warn.
+     */
+    private syncTopicSettings;
+    /** An optional client method, bound, or an error naming it. */
+    private requireClient;
     private pollLoop;
+    /**
+     * The chat, or chat topic, a received message belongs to. In topic mode only a
+     * message flagged as a topic message is in a topic; a reply in the main chat
+     * may carry a `message_thread_id` too.
+     */
+    private messageTarget;
+    /** In topic mode, the main chat: it binds no session and only starts topics. */
+    private isLobby;
     private authorizedUser;
     private handleUpdate;
+    /**
+     * The main chat in topic mode: a few commands work as usual, `/new` and any
+     * other message open the workspace picker of a new topic, and session
+     * commands point to the topics.
+     */
+    private handleLobbyMessage;
     /** Route chat input to a waiting question; returns false when the message is an ordinary command. */
     private handleQuestionInput;
     private handleCommand;
@@ -139,6 +182,10 @@ export declare class TelegramBridge {
      * @returns the panel's message id.
      */
     private sendPanel;
+    /** Remember where a panel was sent, for taps that do not name its topic. */
+    private notePanelTarget;
+    /** The chat or topic of a tapped panel: where it was sent, else what the update says. */
+    private panelTarget;
     /** Whether the next panel tries a widget first. */
     private widgetsWanted;
     private noteWidgetRefused;
@@ -169,6 +216,27 @@ export declare class TelegramBridge {
     /** Bind this chat to an existing session, unarchiving it first when needed. */
     private openSession;
     private bind;
+    /** Write a binding change; a failure only costs the binding after a restart. */
+    private storeBinding;
+    /**
+     * Bind each stored chat or topic to its session again. The workspace is the one
+     * that lists the session; bindings of removed or archived sessions are dropped.
+     */
+    private restoreBindings;
+    private rebind;
+    /**
+     * Create a topic, a session in `workspace`, and the binding between them, in
+     * that order; when a later step fails, the earlier ones are undone (the
+     * session is archived: DSH cannot delete sessions). The topic opens with the
+     * workspace's name, and `source`, a main-chat message, becomes its first input.
+     */
+    private createTopicSession;
+    /** Roll back a topic whose session could not be created or bound; each step is best-effort. */
+    private undoTopicSession;
+    /** Tell `target` where the new topic is, with a button that opens it when the bot's username is known. */
+    private sendTopicLink;
+    /** In topic mode, name the session's topic after its title once DSH has one. */
+    private renameTopic;
     /**
      * Register `telegram_widget` in the Agent's own scope, so only sessions bound
      * to a Telegram chat see it. A failure leaves the channel without the tool.

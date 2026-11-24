@@ -2,57 +2,75 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { targetChatId, targetThreadId } from './client.js'
+import type { TelegramTarget } from './client.js'
 
-/** One replaceable complete output per bot/chat; retained for display recovery. */
+/** DSH's own home resolution: blank means unset; `~`, `~/` and `~\` expand. */
+export function dshHome(): string {
+  const configured = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : join(homedir(), '.dsh')
+  return configured === '~' ? homedir()
+    : configured.startsWith('~/') || configured.startsWith('~\\') ? join(homedir(), configured.slice(2)) : resolve(configured)
+}
+
+/** Bot identity that survives token rotation; never put the token in a file name. */
+export function botKey(token: string): string {
+  return createHash('sha256').update(token.split(':')[0]!).digest('hex')
+}
+
+/** Replace `path` in one step, so a crash never leaves a partly written file. */
+export async function writeFileAtomic(path: string, data: string): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, data, { mode: 0o600 })
+    await rename(temporary, path)
+  } finally {
+    await rm(temporary, { force: true })
+  }
+}
+
+/** One replaceable complete output per bot/chat (or chat topic); retained for display recovery. */
 export class TelegramResultCache {
-  private readonly queues = new Map<number, Promise<unknown>>()
+  private readonly queues = new Map<string, Promise<unknown>>()
   readonly directory: string
 
   constructor(token: string, directory?: string) {
-    // Match DSH's own home resolution: blank means unset; `~`, `~/` and `~\` expand.
-    const configured = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : join(homedir(), '.dsh')
-    const home = configured === '~' ? homedir()
-      : configured.startsWith('~/') || configured.startsWith('~\\') ? join(homedir(), configured.slice(2)) : resolve(configured)
-    // Bot identity survives token rotation; never put the token in a file name.
-    const bot = createHash('sha256').update(token.split(':')[0]!).digest('hex')
-    this.directory = join(directory ?? join(home, 'telegram-results'), bot)
+    this.directory = join(directory ?? join(dshHome(), 'telegram-results'), botKey(token))
   }
 
-  private async exclusive<T>(chatId: number, task: () => Promise<T>): Promise<T> {
-    const previous = this.queues.get(chatId) ?? Promise.resolve()
+  private async exclusive<T>(chat: TelegramTarget, task: () => Promise<T>): Promise<T> {
+    const key = this.path(chat)
+    const previous = this.queues.get(key) ?? Promise.resolve()
     const next = previous.catch(() => {}).then(task)
-    this.queues.set(chatId, next)
+    this.queues.set(key, next)
     try { return await next }
-    finally { if (this.queues.get(chatId) === next) this.queues.delete(chatId) }
+    finally { if (this.queues.get(key) === next) this.queues.delete(key) }
   }
 
-  private path(chatId: number): string {
-    if (!Number.isSafeInteger(chatId)) throw new Error('Invalid Telegram chat id')
-    return join(this.directory, `${chatId}.json`)
+  /** `<chat>.json` for a chat, `<chat>-t<topic>.json` for one of its topics. */
+  private path(chat: TelegramTarget): string {
+    const chatId = targetChatId(chat)
+    const threadId = targetThreadId(chat)
+    if (!Number.isSafeInteger(chatId) || (threadId !== undefined && !Number.isSafeInteger(threadId))) {
+      throw new Error('Invalid Telegram chat id')
+    }
+    return join(this.directory, threadId === undefined ? `${chatId}.json` : `${chatId}-t${threadId}.json`)
   }
 
   /** Persist `markdown` before sending it, so a failed or unrendered delivery can be resent. */
-  async deliver(chatId: number, markdown: string, send: (text: string) => Promise<unknown>): Promise<void> {
-    return this.exclusive(chatId, async () => {
+  async deliver(chat: TelegramTarget, markdown: string, send: (text: string) => Promise<unknown>): Promise<void> {
+    return this.exclusive(chat, async () => {
       await mkdir(this.directory, { recursive: true, mode: 0o700 })
-      const path = this.path(chatId)
-      const temporary = `${path}.${randomUUID()}.tmp`
-      try {
-        await writeFile(temporary, JSON.stringify({ markdown }), { mode: 0o600 })
-        await rename(temporary, path)
-      } finally {
-        await rm(temporary, { force: true })
-      }
+      await writeFileAtomic(this.path(chat), JSON.stringify({ markdown }))
       // API acceptance does not guarantee that a client rendered the message.
       await send(markdown)
     })
   }
 
   /** Resend the cached output; `false` when this chat has none. */
-  async resend(chatId: number, send: (text: string) => Promise<unknown>): Promise<boolean> {
-    return this.exclusive(chatId, async () => {
+  async resend(chat: TelegramTarget, send: (text: string) => Promise<unknown>): Promise<boolean> {
+    return this.exclusive(chat, async () => {
       let raw: string
-      try { raw = await readFile(this.path(chatId), 'utf8') }
+      try { raw = await readFile(this.path(chat), 'utf8') }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
         throw error

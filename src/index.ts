@@ -47,6 +47,8 @@ export const Config = Schema.object({
   panelMode: Schema.union(['auto', 'widget', 'keyboard']).default('auto'),
   apiBaseUrl: Schema.string().pattern(/^https?:\/\//),
   resultCacheDirectory: Schema.string().min(1),
+  // Private-chat topic mode: one topic per DSH session; off restores the bot's earlier topic settings.
+  privateTopics: Schema.boolean().default(false),
 })
 
 // Settings from releases before the Plugins page: DSH 0.2.1-rc.2 refuses any `DSH_`-prefixed

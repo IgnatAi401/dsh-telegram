@@ -54,6 +54,9 @@ export interface TelegramTextQuote {
 export interface TelegramMessage {
     readonly message_id: number;
     readonly chat: TelegramChat;
+    /** Topic of a private chat with topics (Bot API 10.5); absent in the main chat. */
+    readonly message_thread_id?: number;
+    readonly is_topic_message?: true;
     readonly from?: TelegramUser;
     readonly text?: string;
     /** Rich messages carry their content here instead of in `text`. */
@@ -90,6 +93,8 @@ export interface TelegramWidgetQuery {
     /** Omitted for widgets in inline messages, which this plugin never sends. */
     readonly chat?: TelegramChat;
     readonly message_id?: number;
+    /** Not documented for widget queries; read in case Telegram sends it for a topic. */
+    readonly message_thread_id?: number;
     /** 1-64 bytes chosen by the widget's code. */
     readonly data: string;
 }
@@ -124,6 +129,31 @@ export interface TelegramForceReply {
 }
 /** Reply-markup shapes used by the question flow. */
 export type TelegramReplyMarkup = TelegramInlineKeyboardMarkup | TelegramForceReply;
+/** The private-chat topic settings of `setMySettings` (Bot API 10.5). */
+export interface TelegramBotSettings {
+    readonly has_topics_enabled?: boolean;
+    readonly allows_users_to_create_topics?: boolean;
+    readonly has_topic_sidebar?: boolean;
+}
+/** A topic created with `createForumTopic`. */
+export interface TelegramForumTopic {
+    readonly message_thread_id: number;
+    readonly name: string;
+}
+/** One topic of a private chat with topics (Bot API 10.5). */
+export interface TelegramChatTarget {
+    readonly chatId: number;
+    readonly threadId?: number;
+}
+/**
+ * Where a call goes: a bare chat id, or a chat plus an optional topic. A target
+ * without `threadId` sends exactly what a bare chat id does.
+ */
+export type TelegramTarget = number | TelegramChatTarget;
+/** The `chat_id` of a target. */
+export declare function targetChatId(target: TelegramTarget): number;
+/** The `message_thread_id` of a target, if it names a topic. */
+export declare function targetThreadId(target: TelegramTarget): number | undefined;
 /** Telegram update envelope for text messages and inline-button callbacks. */
 export interface TelegramUpdate {
     readonly update_id: number;
@@ -148,35 +178,45 @@ export interface TelegramRichMedia {
 /** Runtime seam surface tests substitute with a fake. */
 export interface TelegramClientLike {
     /** Native Rich Markdown (including official HTML extensions); drafts expire after 30 seconds. */
-    sendRichMessageDraft(chatId: number, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
-    sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
+    sendRichMessageDraft(chat: TelegramTarget, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
+    sendRichMessage(chat: TelegramTarget, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
     /** Upload media together with the rich message that embeds them through `tg://<type>?id=` links. */
-    sendRichMessageWithMedia(chatId: number, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
+    sendRichMessageWithMedia(chat: TelegramTarget, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
     /** Replace rich content and its inline keyboard in a single request. */
-    editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
+    editRichMessage(chat: TelegramTarget, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
     /** Long-poll for updates at or after `offset`. */
     getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     /** Send a chat action such as `typing`. */
-    sendChatAction(chatId: number, action: string, signal?: AbortSignal): Promise<boolean>;
+    sendChatAction(chat: TelegramTarget, action: string, signal?: AbortSignal): Promise<boolean>;
     /** Register the bot's slash-command list (shown in the Telegram UI). */
     setMyCommands(commands: Array<{
         command: string;
         description: string;
     }>, signal?: AbortSignal): Promise<boolean>;
+    /** Change bot settings (Bot API 10.5); optional so test fakes may omit it. */
+    setMySettings?(settings: TelegramBotSettings, signal?: AbortSignal): Promise<boolean>;
+    /** The bot's own `BotFullInfo`; optional so test fakes may omit it. */
+    getMe?(signal?: AbortSignal): Promise<Record<string, unknown>>;
+    /** Create a topic in a private chat with the bot; optional so test fakes may omit it. */
+    createForumTopic?(chatId: number, name: string, signal?: AbortSignal): Promise<TelegramForumTopic>;
+    /** Rename a topic (1-128 characters). */
+    editForumTopic?(chatId: number, threadId: number, name: string, signal?: AbortSignal): Promise<boolean>;
+    /** Delete a topic with all its messages. */
+    deleteForumTopic?(chatId: number, threadId: number, signal?: AbortSignal): Promise<boolean>;
     /** Replace or remove the inline keyboard below a message. */
-    editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
+    editMessageReplyMarkup(chat: TelegramTarget, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Acknowledge a callback so Telegram dismisses the button progress spinner. */
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
     /** Send an HTML widget that may send requests back as `widget_query` updates. */
-    sendWidget(chatId: number, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
+    sendWidget(chat: TelegramTarget, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Replace the chat state of a sent widget; its HTML can never change. */
-    editMessageWidgetData(chatId: number, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
+    editMessageWidgetData(chat: TelegramTarget, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
     /** Answer a widget's request within 15 seconds; `data` reaches only that widget. */
     answerWidgetQuery(widgetQueryId: string, data?: string, signal?: AbortSignal): Promise<boolean>;
     /** Delete up to 100 messages from one chat in a single request. */
-    deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
+    deleteMessages(chat: TelegramTarget, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
     /** Upload one file as a document; Telegram keeps the original bytes (images are not recompressed). */
-    sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
+    sendDocument(chat: TelegramTarget, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
     /** Resolve and download one Telegram-hosted file under an explicit byte cap. */
     downloadFile(fileId: string, maxBytes: number, signal?: AbortSignal): Promise<TelegramDownloadedFile>;
 }
@@ -233,20 +273,21 @@ export declare class TelegramClient implements TelegramClientLike {
     /**
      * Send a chat action such as `typing`; Telegram shows it briefly while a
      * real message is on the way.
-     * @param chatId - target chat id.
+     * @param chat - target chat, optionally with its topic.
      * @param action - the action name (for example `typing`).
      * @returns whether the action was accepted.
      */
-    sendChatAction(chatId: number, action: string, signal?: AbortSignal): Promise<boolean>;
-    sendRichMessageDraft(chatId: number, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
-    sendRichMessage(chatId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
+    sendChatAction(chat: TelegramTarget, action: string, signal?: AbortSignal): Promise<boolean>;
+    sendRichMessageDraft(chat: TelegramTarget, draftId: number, markdown: string, signal?: AbortSignal): Promise<boolean>;
+    sendRichMessage(chat: TelegramTarget, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramReplyMarkup): Promise<TelegramMessage>;
     /**
      * Multipart `sendRichMessage`: each file is posted under its id and named in
      * `rich_message.media` as `attach://<id>`. Telegram refuses the whole message
      * beyond 50 media, 50 MB in total, or with an empty file.
      */
-    sendRichMessageWithMedia(chatId: number, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
-    editRichMessage(chatId: number, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
+    sendRichMessageWithMedia(chat: TelegramTarget, markdown: string, media: readonly TelegramRichMedia[], signal?: AbortSignal): Promise<TelegramMessage>;
+    /** Edits name the message by its chat-wide id, so a topic is not sent. */
+    editRichMessage(chat: TelegramTarget, messageId: number, markdown: string, signal?: AbortSignal, replyMarkup?: TelegramInlineKeyboardMarkup): Promise<TelegramMessage>;
     /**
      * Register the bot's slash-command list; Telegram shows it in the `/` menu.
      * @param commands - `{ command, description }` pairs (command without the leading slash).
@@ -256,18 +297,26 @@ export declare class TelegramClient implements TelegramClientLike {
         command: string;
         description: string;
     }>, signal?: AbortSignal): Promise<boolean>;
-    editMessageReplyMarkup(chatId: number, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
+    /** Change bot settings (Bot API 10.5); omitted settings stay unchanged. */
+    setMySettings(settings: TelegramBotSettings, signal?: AbortSignal): Promise<boolean>;
+    /** The bot's own `BotFullInfo`, including its settings (Bot API 10.5). */
+    getMe(signal?: AbortSignal): Promise<Record<string, unknown>>;
+    /** Create a topic; in a private chat this needs topics enabled through `setMySettings`. */
+    createForumTopic(chatId: number, name: string, signal?: AbortSignal): Promise<TelegramForumTopic>;
+    editForumTopic(chatId: number, threadId: number, name: string, signal?: AbortSignal): Promise<boolean>;
+    deleteForumTopic(chatId: number, threadId: number, signal?: AbortSignal): Promise<boolean>;
+    editMessageReplyMarkup(chat: TelegramTarget, messageId: number, replyMarkup?: TelegramInlineKeyboardMarkup, signal?: AbortSignal): Promise<TelegramMessage>;
     answerCallbackQuery(callbackQueryId: string, text?: string, showAlert?: boolean, signal?: AbortSignal): Promise<boolean>;
-    sendWidget(chatId: number, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
-    editMessageWidgetData(chatId: number, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
+    sendWidget(chat: TelegramTarget, widget: TelegramWidgetInput, signal?: AbortSignal): Promise<TelegramMessage>;
+    editMessageWidgetData(chat: TelegramTarget, messageId: number, chatData: string, signal?: AbortSignal): Promise<boolean>;
     answerWidgetQuery(widgetQueryId: string, data?: string, signal?: AbortSignal): Promise<boolean>;
-    deleteMessages(chatId: number, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
+    deleteMessages(chat: TelegramTarget, messageIds: readonly number[], signal?: AbortSignal): Promise<boolean>;
     /**
      * Upload a file through multipart `sendDocument`. The public Bot API accepts
      * at most 50 MB per file; callers check the size before reading the file.
      * @param caption - plain-text caption; Telegram allows 1024 characters.
      */
-    sendDocument(chatId: number, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
+    sendDocument(chat: TelegramTarget, document: Blob, fileName: string, caption?: string, signal?: AbortSignal): Promise<TelegramMessage>;
     /**
      * Resolve a Telegram `file_id` and download it without ever buffering more
      * than the caller-approved limit. The public Bot API currently imposes its

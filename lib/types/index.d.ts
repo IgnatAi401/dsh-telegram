@@ -37,6 +37,7 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     panelMode: Schema<"auto" | "widget" | "keyboard", "auto" | "widget" | "keyboard", "defined">;
     apiBaseUrl: Schema<string, string, "plain">;
     resultCacheDirectory: Schema<string, string, "plain">;
+    privateTopics: Schema<boolean, boolean, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     token: Schema<string, string, "volatile">;
     allowedUserIds: Schema<NoInfer<number[]>, NoInfer<number[]>, "volatile-defined">;
@@ -46,6 +47,7 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     panelMode: Schema<"auto" | "widget" | "keyboard", "auto" | "widget" | "keyboard", "defined">;
     apiBaseUrl: Schema<string, string, "plain">;
     resultCacheDirectory: Schema<string, string, "plain">;
+    privateTopics: Schema<boolean, boolean, "defined">;
 }>>, "plain">;
 /**
  * Start the Telegram bridge and restart it whenever the token or allowlist
