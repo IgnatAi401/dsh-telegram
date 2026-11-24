@@ -15,7 +15,22 @@ const FOLD_PREVIEW = '折叠内容将在生成完成后显示。'
  * The update in flight already spaces them by a Bot API round trip (about half
  * a second through a distant proxy); a 429 answer backs off further.
  */
-const DRAFT_INTERVAL_MS = 600
+export const DRAFT_INTERVAL_MS = 600
+
+/**
+ * Draft pacing shared by every turn streaming into one private chat: topics
+ * of a chat share Telegram's flood limits, so a 429 holds all of them.
+ */
+export interface DraftPacing {
+  /** Shortest time between the starts of two draft updates of this turn. */
+  interval(): number
+  /** Time (ms since epoch) before which no draft of the chat may be sent. */
+  holdUntil(): number
+  /** Telegram answered 429: hold every draft of the chat until `until`. */
+  flood(until: number): void
+}
+
+const DEFAULT_PACING: DraftPacing = { interval: () => DRAFT_INTERVAL_MS, holdUntil: () => 0, flood: () => {} }
 
 /**
  * Where the text's first disclosure that is still open (or a stray summary)
@@ -55,6 +70,8 @@ function previewText(text: string, overflow: boolean): string {
  */
 export class TelegramProgress {
   private draftId = randomInt(1, 2 ** 31)
+  /** Every draft id this turn used, so native Stop on any of its previews finds it. */
+  private readonly draftIds = new Set([this.draftId])
   private readonly started = Date.now()
   private readonly abort = new AbortController()
   private readonly signal: AbortSignal
@@ -89,6 +106,7 @@ export class TelegramProgress {
     private readonly warn: (error: unknown) => void,
     /** Record a temporary message for removal after final delivery. */
     private readonly track: (messageId: number) => void,
+    private readonly pacing: DraftPacing = DEFAULT_PACING,
   ) {
     this.signal = AbortSignal.any([stopSignal, this.abort.signal])
     this.timer = setInterval(() => this.schedule(), 1200)
@@ -190,6 +208,17 @@ export class TelegramProgress {
   private newDraft(): void {
     this.epoch++
     this.draftId = randomInt(1, 2 ** 31)
+    this.draftIds.add(this.draftId)
+  }
+
+  /** Whether `draftId` is one of this turn's previews. */
+  hasDraft(draftId: number): boolean {
+    return this.draftIds.has(draftId)
+  }
+
+  /** Whether the turn still streams previews. */
+  get live(): boolean {
+    return !this.disposed
   }
 
   private changed(): void {
@@ -265,7 +294,7 @@ export class TelegramProgress {
   }
 
   private schedule(): void {
-    if (this.disposed || this.paused || this.scheduled || Date.now() < this.nextSend
+    if (this.disposed || this.paused || this.scheduled || Date.now() < this.sendAt()
       || (!this.dirty && Date.now() - this.lastSent < 12000)) return
     this.scheduled = true
     const epoch = this.epoch
@@ -276,15 +305,16 @@ export class TelegramProgress {
         this.dirty = false
         await this.send()
         this.lastSent = Date.now()
-        this.nextSend = started + DRAFT_INTERVAL_MS
+        this.nextSend = started + this.pacing.interval()
       } catch (error) {
         if (this.signal.aborted) return
         this.dirty = true
         if (error instanceof TelegramApiError && error.code === 429) {
           const delay = Number.isFinite(error.retryAfter) ? Math.max(1, error.retryAfter!) : 5
           this.nextSend = Date.now() + delay * 1000
+          this.pacing.flood(this.nextSend)
         } else if (/not modified/i.test(String(error))) {
-          this.nextSend = started + DRAFT_INTERVAL_MS
+          this.nextSend = started + this.pacing.interval()
         } else {
           this.nextSend = Date.now() + 5000
           this.warn(error)
@@ -295,10 +325,15 @@ export class TelegramProgress {
         if (epoch !== this.epoch) this.schedule()
         else if (this.dirty && !this.disposed) {
           clearTimeout(this.followUp)
-          this.followUp = setTimeout(() => this.schedule(), Math.max(0, this.nextSend - Date.now()))
+          this.followUp = setTimeout(() => this.schedule(), Math.max(0, this.sendAt() - Date.now()))
         }
       }
     })
+  }
+
+  /** When the next draft may go out: this turn's own spacing, or the chat's flood hold. */
+  private sendAt(): number {
+    return Math.max(this.nextSend, this.pacing.holdUntil())
   }
 
   private preview(): string {

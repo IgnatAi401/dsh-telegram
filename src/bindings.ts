@@ -1,7 +1,9 @@
 /**
  * Which DSH session each Telegram chat (or chat topic) is bound to, kept in
  * DSH_HOME so a restart resumes the conversation. Only the session id is
- * stored: its workspace is read from the Workspace registry on restore.
+ * stored for a live session: its workspace is read from the Workspace registry
+ * on restore. The workspace id is kept only as a hint for when the session is
+ * gone, so a topic can offer a new session in the same workspace.
  * @module telegram/bindings
  */
 
@@ -17,6 +19,8 @@ export interface TelegramBinding {
   /** Absent for the main chat (no topic). */
   readonly threadId?: number
   readonly sessionId: string
+  /** The session's workspace when it was bound; used only once the session is gone. */
+  readonly workspaceId?: string
 }
 
 interface BindingFile {
@@ -49,6 +53,7 @@ function validBinding(value: unknown): value is TelegramBinding {
     && Number.isSafeInteger(entry.chatId)
     && (entry.threadId === undefined || Number.isSafeInteger(entry.threadId))
     && typeof entry.sessionId === 'string' && entry.sessionId !== ''
+    && (entry.workspaceId === undefined || typeof entry.workspaceId === 'string')
 }
 
 /**
@@ -85,19 +90,25 @@ export class TelegramBindingStore {
         chatId: entry.chatId,
         ...(entry.threadId === undefined ? {} : { threadId: entry.threadId }),
         sessionId: entry.sessionId,
+        ...(entry.workspaceId === undefined ? {} : { workspaceId: entry.workspaceId }),
       }
       this.bindings.set(targetKey(binding), binding)
     }
     return [...this.bindings.values()]
   }
 
-  /** Bind `target` to `sessionId`; resolves once the file is written. */
-  set(target: TelegramTarget, sessionId: string): Promise<void> {
+  /** Bind `target` to `sessionId` of `workspaceId`; resolves once the file is written. */
+  set(target: TelegramTarget, sessionId: string, workspaceId?: string): Promise<void> {
     const threadId = targetThreadId(target)
-    const binding: TelegramBinding = { chatId: targetChatId(target), ...(threadId === undefined ? {} : { threadId }), sessionId }
+    const binding: TelegramBinding = {
+      chatId: targetChatId(target),
+      ...(threadId === undefined ? {} : { threadId }),
+      sessionId,
+      ...(workspaceId === undefined ? {} : { workspaceId }),
+    }
     const key = targetKey(binding)
     const previous = this.bindings.get(key)
-    if (previous?.sessionId === sessionId) return this.writing
+    if (previous?.sessionId === sessionId && previous.workspaceId === workspaceId) return this.writing
     this.bindings.set(key, binding)
     return this.save()
   }

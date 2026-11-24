@@ -49,7 +49,8 @@ import type { LocalMediaKind, MarkdownImage } from './media.js'
 import { encodePanel, PANEL_HTML } from './panel.js'
 import { renderKeyboardPanel } from './panel-keyboard.js'
 import type { Panel, PanelButton, PanelRow } from './panel.js'
-import { TelegramProgress } from './progress.js'
+import { DRAFT_INTERVAL_MS, TelegramProgress } from './progress.js'
+import type { DraftPacing } from './progress.js'
 import { TelegramResultCache } from './result-cache.js'
 import { contextOccupancy, formatExactTokens, formatSessionStats, formatTokens } from './stats.js'
 import { richBlocksPlain, richTextPlain } from './rich-text.js'
@@ -143,6 +144,17 @@ interface ActiveChatSession {
   turnStartedAt: number | undefined
   /** The name the bridge last gave this session's topic, in topic mode. */
   topicName: string | undefined
+  /** The topic's name without the archive mark: the session title, or its first message. */
+  topicBase: string | undefined
+  /** Ids of user messages this bridge submitted that no turn has claimed yet. */
+  readonly telegramInputs: Set<string>
+  /**
+   * Who started the running turn: `telegram` when its prompt came from this
+   * chat, `other` (the Web UI, another client) otherwise; unknown until the
+   * turn's first prompt is logged. Questions and approvals of an `other` turn
+   * are left to DSH's own handlers.
+   */
+  turnOrigin: 'telegram' | 'other' | undefined
 }
 
 /** State of one Telegram chat or topic; a workspace stays selected after archiving its session. */
@@ -150,6 +162,8 @@ interface ChatState {
   readonly target: TelegramTarget
   workspace: Workspace | undefined
   active: ActiveChatSession | undefined
+  /** In topic mode: the topic's session no longer exists in DSH. */
+  missingSessionId?: SessionId | undefined
 }
 
 /** One verified image downloaded from Telegram into the selected workspace. */
@@ -199,8 +213,12 @@ interface TelegramImageCandidate {
 
 type DeliveryMode = 'default' | 'followup'
 
-/** `create` picks the workspace of a new topic in topic mode. */
-type MenuView = 'home' | 'workspaces' | 'sessions' | 'models' | 'reasoning' | 'create'
+/**
+ * Topic mode: `create` picks the workspace of a new topic, `delete` confirms
+ * deleting a topic, and `recover` (main chat) offers a new topic for the
+ * session whose topic is gone.
+ */
+type MenuView = 'home' | 'workspaces' | 'sessions' | 'models' | 'reasoning' | 'create' | 'delete' | 'recover'
 
 interface MenuTarget {
   readonly messageId: number
@@ -278,7 +296,8 @@ interface MenuState {
   /** What the panel shows, so it can be redrawn when the task state changes. */
   readonly view: MenuView
   readonly page: number
-  readonly workspaceId: string | undefined
+  /** The workspace a `sessions` page lists, or the session a `recover` panel is about. */
+  readonly ref: string | undefined
   /** The main-chat message a `create` panel would start the new session with. */
   readonly source: TelegramMessage | undefined
   readonly fingerprint: string
@@ -307,6 +326,9 @@ const FOLLOWUP_HELP = [
   '- 回复一条文字、图片或文件后发送 `/followup`，可将引用内容加入队列。',
   '- 收集模式中单独发送 `/followup`，会提交全部收集内容。',
 ].join('\n')
+
+/** How many days back a sync opens topics for, unless `/sync` says otherwise. */
+const SYNC_DAYS = 3
 
 const HELP_TEXT = [
   '# 📖 命令帮助',
@@ -359,6 +381,7 @@ const HELP_TEXT = [
   '| /start | 确认 Bot 在线 |',
   '| /help | 显示本页 |',
   '| /resend | 重发最后一份完整结果 |',
+  `| /sync | 话题模式：让话题与 DSH 的会话同步（默认最近 ${SYNC_DAYS} 天，可写 \`/sync 7\` 或 \`/sync all\`） |`,
   '',
   '每个聊天保留最后一份完整结果，发送成功后仍可重发，新结果会覆盖旧缓存。',
 ].join('\n')
@@ -376,6 +399,7 @@ const MY_COMMANDS = [
   { command: 'discard', description: '放弃本次收集' },
   { command: 'followup', description: '将消息排到当前任务之后' },
   { command: 'resend', description: '重发最后一份完整结果' },
+  { command: 'sync', description: '话题模式：同步话题，可加天数或 all' },
   { command: 'help', description: '查看使用帮助' },
 ]
 
@@ -397,6 +421,26 @@ const TOPIC_MODE_SETTINGS: TelegramBotSettings = { has_topics_enabled: true, all
 /** Telegram's limit for a topic name. */
 const MAX_TOPIC_NAME_LENGTH = 128
 const DEFAULT_TOPIC_NAME = '新会话'
+/** Prefix of an archived session's topic: private chats cannot close topics. */
+const ARCHIVED_TOPIC_MARK = '📦 '
+const SYNC_USAGE = [
+  'ℹ️ **/sync 的用法**',
+  '',
+  `- \`/sync\`：为最近 ${SYNC_DAYS} 天有过对话的会话补建话题`,
+  '- `/sync 7`：最近 7 天（任意正整数天数）',
+  '- `/sync all`：所有会话',
+  '',
+  '已归档、已不存在和没有对话的会话，话题总会被删除，不受天数限制。',
+].join('\n')
+
+/** `/sync`'s argument: days back (`Infinity` for `all`), or undefined when it is not one. */
+function syncDaysOf(argsText: string): number | undefined {
+  const value = argsText.trim().toLowerCase()
+  if (value === '') return SYNC_DAYS
+  if (value === 'all' || value === '全部') return Number.POSITIVE_INFINITY
+  return /^[1-9]\d{0,4}$/.test(value) ? Number(value) : undefined
+}
+
 const LOBBY_HINT = [
   'ℹ️ **主会话不绑定会话**',
   '',
@@ -513,6 +557,11 @@ function isWidgetRefused(error: unknown): boolean {
   return /INPUT_MEDIA_WIDGET_NOT_ALLOWED/i.test(messageOf(error))
 }
 
+/** True when Telegram refused a send because its topic no longer exists. */
+function isTopicMissing(error: unknown): boolean {
+  return /message thread not found|TOPIC_DELETED|TOPIC_ID_INVALID/i.test(messageOf(error))
+}
+
 /** True when an edit/delete target is known not to exist anymore. */
 function isMissingMessage(error: unknown): boolean {
   return /message to (?:edit|delete) not found|message can't be (?:edited|deleted)/i.test(messageOf(error))
@@ -550,6 +599,23 @@ function chatTarget(chatId: number, threadId: number | undefined): TelegramTarge
 /** Text-bearing Telegram messages use `text`; media messages use `caption`. */
 function telegramText(message: TelegramMessage): string | undefined {
   return message.text ?? message.caption
+}
+
+/**
+ * The message the user replied to, if they did. In a topic Telegram makes every
+ * message a reply to the topic's first message; that one is no reply.
+ */
+function explicitReply(message: TelegramMessage): TelegramMessage | undefined {
+  const reply = message.reply_to_message
+  if (reply === undefined || reply.forum_topic_created !== undefined) return undefined
+  // A main-chat reply may carry a thread id too; only a topic message's thread is its topic.
+  return message.is_topic_message === true && reply.message_id === message.message_thread_id ? undefined : reply
+}
+
+/** A topic's service message (created, renamed, closed, reopened): nothing for the Agent. */
+function isTopicServiceMessage(message: TelegramMessage): boolean {
+  return message.forum_topic_created !== undefined || message.forum_topic_edited !== undefined
+    || message.forum_topic_closed !== undefined || message.forum_topic_reopened !== undefined
 }
 
 /** Parse a leading Telegram slash command while preserving the unsplit argument text. */
@@ -750,8 +816,22 @@ export class TelegramBridge {
   private readonly menuUpdates = new Map<string, Promise<void>>()
   /** The panel tap each chat is handling; taps are handled one at a time by the polling loop. */
   private readonly taps = new Map<string, PanelTap>()
-  /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
-  private readonly compacting = new Map<string, AbortController>()
+  /** Chats whose `/compact` is still summarizing, with its draft; native Stop aborts it. */
+  private readonly compacting = new Map<string, { readonly controller: AbortController; readonly target: TelegramTarget; readonly draftId: number }>()
+  /** Topics Telegram reported gone, by {@link targetKey}; each is reported once. */
+  private readonly lostTopics = new Set<string>()
+  /**
+   * Topics whose session is archived or gone, waiting for {@link syncTopics} to
+   * delete them. Their binding stays stored until Telegram confirms, so a
+   * failed deletion is retried by the next sync, or after a restart.
+   */
+  private readonly staleTopics: Array<{ readonly target: TelegramTarget; readonly sessionId: SessionId }> = []
+  /** The running topic sync; see {@link syncTopics}. */
+  private topicSync: Promise<void> = Promise.resolve()
+  /** The topic each session lost, so its rebuilt topic can receive the cached result. */
+  private readonly lostTopicOf = new Map<SessionId, TelegramTarget>()
+  /** Per private chat: no draft before this time (ms), after Telegram answered 429. */
+  private readonly floodHolds = new Map<number, number>()
   /** Work started off the polling loop; `stop` waits for it. */
   private readonly backgroundTasks = new Set<Promise<void>>()
   private readonly abortController = new AbortController()
@@ -806,11 +886,11 @@ export class TelegramBridge {
       ctx.on('session/event', (session, event) => this.handleSessionEvent(session, event)),
       ctx.on('agent/assistant-stream', ({ agent, frame }) => this.boundChat(agent)?.progress?.stream(frame)),
       ctx.on('user-questions/request', (request, next) => {
-        const chat = request.agent === undefined ? undefined : this.boundChat(request.agent)
+        const chat = request.agent === undefined ? undefined : this.telegramTurn(request.agent)
         return chat === undefined ? next() : this.askThroughTelegram(chat, request)
       }, { prepend: true }),
       ctx.on('approval/request', (request, next) => {
-        const chat = this.boundChat(request.agent)
+        const chat = this.telegramTurn(request.agent)
         return chat === undefined ? next() : this.approveThroughTelegram(chat, request)
       }, { prepend: true }),
       // Required: the channel's output rules still apply when a deployment turns off optional
@@ -832,8 +912,9 @@ export class TelegramBridge {
     )
     this.commandTask = this.registerCommands()
     // Updates wait for the restored bindings, so a message after a restart reaches its session,
-    // and for the topic settings, whose previous values are kept with the bindings.
-    this.pollTask = this.restoreBindings().then(() => this.syncTopicSettings()).then(() => this.pollLoop())
+    // for the topic settings, whose previous values are kept with the bindings, and for the
+    // topic sync, so the topics match DSH's sessions before anything else happens.
+    this.pollTask = this.restoreBindings().then(() => this.syncTopicSettings()).then(() => this.syncTopics()).then(() => this.pollLoop())
   }
 
   /** Stop polling and release Telegram state; DSH sessions and Agents keep running. */
@@ -857,7 +938,7 @@ export class TelegramBridge {
       this.stopTyping(entry)
       entry.progress?.dispose()
     }
-    await Promise.allSettled([this.pollTask, this.commandTask, ...entries.map(entry => entry.queue), ...this.menuUpdates.values(), ...this.backgroundTasks])
+    await Promise.allSettled([this.pollTask, this.commandTask, this.topicSync, ...entries.map(entry => entry.queue), ...this.menuUpdates.values(), ...this.backgroundTasks])
     await this.bindingStore.flush().catch(() => {})
     this.chats.clear()
     this.chatsBySession.clear()
@@ -946,6 +1027,11 @@ export class TelegramBridge {
     return chatTarget(message.chat.id, topic ? message.message_thread_id : undefined)
   }
 
+  /** Whether DSH no longer lists the session in any workspace (it was removed). */
+  private sessionGone(sessionId: SessionId): boolean {
+    return !this.ctx.workspaceRegistry.list().some(workspace => workspace.sessionIds.includes(sessionId))
+  }
+
   /** In topic mode, the main chat: it binds no session and only starts topics. */
   private isLobby(target: TelegramTarget): boolean {
     return this.privateTopics && targetThreadId(target) === undefined
@@ -958,9 +1044,10 @@ export class TelegramBridge {
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
     const stopped = update.stopped_message_generation
     if (stopped !== undefined) {
-      // Native Stop is a request of the chat (or topic) it was tapped in; the draft id does not gate cancellation.
+      // Native Stop finds its task by the draft; a late Stop of an earlier turn's draft is ignored.
       if (stopped.chat.type === 'private' && (this.allowAllUsers || this.allowedUserIds.has(stopped.chat.id))) {
-        await this.stopCurrentTask(chatTarget(stopped.chat.id, stopped.message_thread_id))
+        const target = this.stopTarget(stopped.chat.id, stopped.draft_id, stopped.message_thread_id)
+        if (target !== undefined) await this.stopCurrentTask(target)
       }
       return
     }
@@ -976,14 +1063,19 @@ export class TelegramBridge {
     // Group semantics (mentions, topics, shared visibility) are out of scope;
     // ignoring groups keeps an allowed user from forwarding one to a private agent.
     if (message === undefined || message.chat.type !== 'private') return
+    // The bot's own topic changes come back as service messages, some of them from the bot itself.
+    if (isTopicServiceMessage(message) || message.from?.is_bot === true) return
     if (!this.authorizedUser(message.from)) {
+      // The fields say which kind of update it was; the content is not logged.
+      this.ctx.logger.warn('[telegram] refused a message from %s (bot: %s; fields: %s)', message.from?.id ?? 'nobody',
+        message.from?.is_bot ?? false, Object.keys(message).join(','))
       await this.safeSend(this.messageTarget(message), '⛔ **访问被拒绝**')
       return
     }
     const target = this.messageTarget(message)
     const parsed = telegramCommand(telegramText(message))
     if (this.isLobby(target)) {
-      await this.handleLobbyMessage(target, message, parsed?.command)
+      await this.handleLobbyMessage(target, message, parsed?.command, parsed?.argsText ?? '')
       return
     }
     const pending = this.pendingQuestions.get(targetKey(target))
@@ -992,7 +1084,18 @@ export class TelegramBridge {
       await this.handleCommand(target, parsed.command, parsed.argsText)
       return
     }
-    const active = this.chats.get(targetKey(target))?.active
+    let active = this.chats.get(targetKey(target))?.active
+    if (active !== undefined && this.isTopic(target) && this.sessionGone(active.sessionId)) {
+      const state = this.stateFor(target)
+      await this.releaseActive(state)
+      state.missingSessionId = active.sessionId
+      active = undefined
+    }
+    if (active === undefined && this.chats.get(targetKey(target))?.missingSessionId !== undefined) {
+      await this.safeSend(target, '⚠️ **这个话题的会话已不存在**\n\n它可能已在 DSH 中删除。可以在下面的面板里新建一个会话继续使用这个话题。')
+      await this.showMenu(target)
+      return
+    }
     if (active === undefined) {
       await this.safeSend(target, this.privateTopics
         ? '⚠️ **这个话题没有绑定会话**\n\n发送 /new 选择工作区新建会话。'
@@ -1009,7 +1112,7 @@ export class TelegramBridge {
       return
     }
     if (message.text === undefined && message.document === undefined && message.photo === undefined
-      && message.reply_to_message === undefined) return
+      && explicitReply(message) === undefined) return
     await this.submitTelegramMessage(active, message, 'default')
   }
 
@@ -1018,11 +1121,11 @@ export class TelegramBridge {
    * other message open the workspace picker of a new topic, and session
    * commands point to the topics.
    */
-  private async handleLobbyMessage(target: TelegramTarget, message: TelegramMessage, command: string | undefined): Promise<void> {
+  private async handleLobbyMessage(target: TelegramTarget, message: TelegramMessage, command: string | undefined, argsText = ''): Promise<void> {
     if (command === '/new') {
       await this.showMenu(target, 'create')
-    } else if (command === '/start' || command === '/help' || command === '/menu' || command === '/resend') {
-      await this.handleCommand(target, command, '')
+    } else if (command === '/start' || command === '/help' || command === '/menu' || command === '/resend' || command === '/sync') {
+      await this.handleCommand(target, command, command === '/sync' ? argsText : '')
     } else if (command !== undefined) {
       await this.safeSend(target, LOBBY_HINT)
     } else if (message.text !== undefined || message.document !== undefined || message.photo !== undefined) {
@@ -1079,6 +1182,20 @@ export class TelegramBridge {
       case '/menu':
         await this.showMenu(target)
         return
+      case '/sync': {
+        if (!this.privateTopics) {
+          await this.safeSend(target, 'ℹ️ **/sync 只在话题模式下使用**')
+          return
+        }
+        const days = syncDaysOf(argsText)
+        if (days === undefined) {
+          await this.safeSend(target, SYNC_USAGE)
+          return
+        }
+        // In the background: a long sync must not hold up other topics' messages and Stop taps.
+        void this.syncTopics(target, days)
+        return
+      }
       case '/resend':
         try {
           const sent = await this.resultCache.resend(target, text =>
@@ -1117,6 +1234,14 @@ export class TelegramBridge {
         return
       }
       case '/archive':
+        if (this.isTopic(target)) {
+          try {
+            await this.deleteTopic(target)
+          } catch (error) {
+            await this.safeSend(target, `⚠️ **归档失败**\n\n${richCodeBlock(messageOf(error))}`)
+          }
+          return
+        }
         try {
           const archived = await this.archiveCurrent(target)
           await this.safeSend(target, archived === undefined
@@ -1179,12 +1304,28 @@ export class TelegramBridge {
     }
   }
 
+  /**
+   * The chat or topic a native Stop belongs to: the one whose turn (or
+   * compaction) streamed that draft, else the topic the update names.
+   */
+  private stopTarget(chatId: number, draftId: number, threadId: number | undefined): TelegramTarget | undefined {
+    for (const chat of this.chatsBySession.values()) {
+      if (targetChatId(chat.target) === chatId && chat.progress?.hasDraft(draftId) === true) return chat.target
+    }
+    for (const compaction of this.compacting.values()) {
+      if (targetChatId(compaction.target) === chatId && compaction.draftId === draftId) return compaction.target
+    }
+    // A draft the bridge does not know: a turn that has drafts of its own was not the one stopped.
+    const target = chatTarget(chatId, threadId)
+    return this.chats.get(targetKey(target))?.active?.progress?.live === true ? undefined : target
+  }
+
   /** Native Stop: cancel the running turn and any question it is waiting on. */
   private async stopCurrentTask(target: TelegramTarget): Promise<void> {
     // The compaction draft carries the Stop button too; its own result reports the cancellation.
     const compaction = this.compacting.get(targetKey(target))
     if (compaction !== undefined) {
-      compaction.abort()
+      compaction.controller.abort()
       return
     }
     const active = this.chats.get(targetKey(target))?.active
@@ -1249,8 +1390,9 @@ export class TelegramBridge {
       return
     }
     const controller = new AbortController()
-    this.compacting.set(targetKey(target), controller)
-    const task = this.runCompaction(active, compaction, controller.signal).finally(() => {
+    const draftId = randomInt(1, 2 ** 31)
+    this.compacting.set(targetKey(target), { controller, target, draftId })
+    const task = this.runCompaction(active, compaction, controller.signal, draftId).finally(() => {
       this.compacting.delete(targetKey(target))
       this.backgroundTasks.delete(task)
     })
@@ -1262,10 +1404,9 @@ export class TelegramBridge {
    * command. A refreshed rich draft shows progress; the result follows as one message
    * with the summary folded.
    */
-  private async runCompaction(active: ActiveChatSession, compaction: CompactionServiceLike, stop: AbortSignal): Promise<void> {
+  private async runCompaction(active: ActiveChatSession, compaction: CompactionServiceLike, stop: AbortSignal, draftId: number): Promise<void> {
     const target = active.target
     const signal = AbortSignal.any([this.abortController.signal, stop])
-    const draftId = randomInt(1, 2 ** 31)
     const started = Date.now()
     // Drafts go out one at a time, so none can land after the result and show a stale preview.
     let drafts = Promise.resolve()
@@ -1389,7 +1530,7 @@ export class TelegramBridge {
       const menu = this.menus.get(targetKey(target))
       if (menu === undefined) return
       try {
-        await this.renderMenu(target, menu.view, menu.page, menu.workspaceId, undefined, menu.messageId, false, menu.source)
+        await this.renderMenu(target, menu.view, menu.page, menu.ref, undefined, menu.messageId, false, menu.source)
       } catch (error) {
         if (isMissingMessage(error)) this.menus.delete(targetKey(target))
         else if (!this.stopped && !isNotModified(error)) this.ctx.logger.warn('[telegram] menu refresh failed: %s', messageOf(error))
@@ -1485,13 +1626,40 @@ export class TelegramBridge {
       }
       await this.sendTopicLink(target, created)
     }
+    /** From the main chat: go to the session's topic, opening one for it when it has none. */
+    const showTopic = async (workspace: Workspace, sessionId: SessionId): Promise<void> => {
+      const { active: opened, existed } = await this.openTopicSession(targetChatId(target), workspace, sessionId)
+      await this.editWidget(target, messageId!, {
+        closed: { kind: 'success', title: existed ? '这个会话已有话题' : '已为会话打开话题', text: `${workspace.title} · ${opened.topicName ?? DEFAULT_TOPIC_NAME}` },
+      })
+      await this.sendTopicLink(target, opened, existed ? '↪️ **这个会话已有话题**' : '✅ **已打开会话**')
+    }
+    const archived = active !== undefined && this.ctx.workspaceRegistry.archivedSessionIds.includes(active.sessionId)
     let panel: Panel
     if (view === 'home' && this.isLobby(target)) {
       panel = {
         header: { icon: 'panel', title: '控制面板' },
         status: { kind: 'idle', text: '话题模式 · 每个话题一个会话' },
         text: '在侧栏打开话题继续任务；新任务从这里新建，也可以直接发一条消息。',
-        actions: [[{ text: '＋ 新建会话', style: 'primary', data: go('create') }, { text: '刷新', data: go('home') }]],
+        actions: [
+          [{ text: '＋ 新建会话', style: 'primary', data: go('create') }, { text: '打开已有会话', data: go('workspaces') }],
+          [{ text: '同步话题', data: act(async () => {
+            void this.syncTopics(target)
+            await navigate('home', 0, undefined, { kind: 'ok', text: '正在同步，完成后会发消息' })
+          }) }, { text: '刷新', data: go('home') }],
+        ],
+      }
+    } else if (view === 'recover') {
+      // `workspaceId` names the session whose topic is gone.
+      const sessionId = workspaceId as SessionId | undefined
+      const workspace = sessionId === undefined ? undefined
+        : this.ctx.workspaceRegistry.list().find(candidate => candidate.sessionIds.includes(sessionId))
+      if (sessionId === undefined || workspace === undefined) throw new Error('这个会话已不存在')
+      const title = (await this.sessionStatus(sessionId).catch(() => undefined))?.title
+      panel = {
+        header: { icon: 'chat', title: '话题已不存在', subtitle: title ?? sessionId },
+        text: `工作区：${workspace.title}。可以为这个会话新建一个话题，原来的最后一份结果会补发到新话题。`,
+        actions: [[{ text: '为原会话重建话题', style: 'primary', data: act(() => showTopic(workspace, sessionId)) }, { text: '不用了', data: go('home') }]],
       }
     } else if (view === 'home') {
       const topicMode = this.privateTopics
@@ -1500,6 +1668,7 @@ export class TelegramBridge {
       panel = {
         header: { icon: 'panel', title: '控制面板' },
         status: this.pendingQuestions.has(targetKey(target)) ? { kind: 'wait', text: '等待你的回答' }
+          : archived ? { kind: 'idle', text: '已归档' }
           : running ? { kind: 'live', text: '运行中', ...(active.turnStartedAt === undefined ? {} : { since: active.turnStartedAt }) }
             : collection !== undefined ? { kind: 'wait', text: `收集中 · 已有 ${collection.parts.length} 项` }
               : { kind: 'idle', text: active === undefined ? '还没有连接会话' : '空闲' },
@@ -1509,7 +1678,7 @@ export class TelegramBridge {
           {
             icon: 'chat',
             label: '会话',
-            value: active === undefined ? '未选择' : status?.title ?? active.sessionId,
+            value: active === undefined ? state.missingSessionId === undefined ? '未选择' : '已不存在' : status?.title ?? active.sessionId,
             ...(topicMode ? {} : { data: state.workspace === undefined ? go('workspaces') : go('sessions', 0, state.workspace.id) }),
           },
           { icon: 'model', label: '模型', value: modelName, data: go('models') },
@@ -1523,6 +1692,16 @@ export class TelegramBridge {
           },
         }),
         actions: topicMode ? [
+          // A topic whose session is gone takes a new one; the topic stays.
+          ...(active !== undefined || state.workspace === undefined ? [] : [[{
+            text: `＋ 在本话题新建会话（${state.workspace.title}）`,
+            style: 'primary' as const,
+            data: act(async () => {
+              const created = await this.createSession(target, state.workspace!)
+              await this.renameTopic(created)
+              await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已创建' })
+            }),
+          }]]),
           [
             ...(state.workspace === undefined ? [] : [{
               text: `＋ 在 ${state.workspace.title} 新建`,
@@ -1532,14 +1711,7 @@ export class TelegramBridge {
             { text: '在其他工作区新建', data: go('create') },
           ],
           [
-            ...(active === undefined ? [] : [{
-              text: '归档',
-              style: 'danger' as const,
-              data: act(async () => {
-                await this.archiveCurrent(target)
-                await navigate('home', 0, undefined, { kind: 'ok', text: '已归档' })
-              }),
-            }]),
+            { text: active === undefined ? '删除话题' : '归档并删除话题', style: 'danger' as const, data: go('delete') },
             { text: '刷新', data: go('home') },
           ],
         ] : [[
@@ -1587,12 +1759,14 @@ export class TelegramBridge {
         plainRows: true,
         rows: items.map((session): PanelRow => {
           const current = active?.sessionId === session.id
-          const badges = [current ? '当前会话' : '', session.running ? '运行中' : '', session.archived ? '已归档' : ''].filter(Boolean)
+          const topic = this.isLobby(target) && this.chatsBySession.has(session.id)
+          const badges = [current ? '当前会话' : '', topic ? '已有话题' : '', session.running ? '运行中' : '', session.archived ? '已归档' : ''].filter(Boolean)
           return {
             title: session.title ?? session.id,
             ...(badges.length > 0 ? { subtitle: badges.join(' · ') } : {}),
             mark: current ? 'current' : 'none',
             data: act(async () => {
+              if (this.isLobby(target)) return showTopic(entry.workspace, session.id)
               idle()
               const result = await this.openSession(target, entry.workspace, session.id)
               await navigate('home', 0, undefined, { kind: 'ok', text: result.startsWith('已取消归档') ? '已恢复并切换会话' : '已切换会话' })
@@ -1605,6 +1779,7 @@ export class TelegramBridge {
           text: '＋ 在此新建会话',
           style: 'primary',
           data: act(async () => {
+            if (this.isLobby(target)) return startTopic(entry.workspace)
             idle()
             await this.createSession(target, entry.workspace)
             await navigate('home', 0, undefined, { kind: 'ok', text: '新会话已创建' })
@@ -1631,6 +1806,13 @@ export class TelegramBridge {
         })),
         ...(catalog.length > 0 ? {} : { empty: { icon: 'folder', text: '还没有工作区，请先在 Web UI 中添加' } }),
         pager,
+      }
+    } else if (view === 'delete') {
+      panel = {
+        header: { icon: 'shield', title: active === undefined ? '删除这个话题？' : '归档并删除这个话题？', back: go('home') },
+        text: active === undefined ? '话题和其中的消息都会被删除。'
+          : '话题和其中的消息都会被删除；DSH 会话会归档保留，之后可以在主会话的「打开已有会话」里重新打开。',
+        actions: [[{ text: '确认删除', style: 'danger', data: act(() => this.deleteTopic(target)) }, { text: '返回', data: go('home') }]],
       }
     } else if (view === 'models') {
       const choices = models.groups.flatMap(group => group.models.map(item => ({ ...item, provider: group.id, group: group.name })))
@@ -1691,7 +1873,7 @@ export class TelegramBridge {
       }
     }
     // Taps read this binding, so later pages update the panel in place.
-    this.menus.set(targetKey(target), { token, messageId, view, page, workspaceId, source, fingerprint: this.menuFingerprint(target), actions })
+    this.menus.set(targetKey(target), { token, messageId, view, page, ref: workspaceId, source, fingerprint: this.menuFingerprint(target), actions })
     if (old !== undefined && old.messageId !== messageId) await this.editWidget(target, old.messageId, EXPIRED_PANEL)
   }
 
@@ -1849,6 +2031,12 @@ export class TelegramBridge {
     return this.chatsBySession.get(agent.session.id)
   }
 
+  /** The bound chat, unless the running turn was started elsewhere: its questions belong there. */
+  private telegramTurn(agent: Agent): ActiveChatSession | undefined {
+    const chat = this.boundChat(agent)
+    return chat?.turnOrigin === 'other' ? undefined : chat
+  }
+
   /** Resolve the live Agent through the Session Controller, resuming a cold session. */
   private async resolveAgent(sessionId: SessionId): Promise<Agent> {
     const found = await this.ctx.sessionController.resolveAgent(sessionId)
@@ -1898,14 +2086,23 @@ export class TelegramBridge {
       progress: undefined,
       turnStartedAt: undefined,
       topicName: undefined,
+      topicBase: undefined,
+      telegramInputs: new Set(),
+      turnOrigin: undefined,
     }
     state.workspace = workspace
     state.active = active
+    state.missingSessionId = undefined
     this.chatsBySession.set(sessionId, active)
     const agent = this.ctx.agents.get(sessionId)
     if (agent !== undefined) this.ensureWidgetTool(agent)
-    if (persist) await this.storeBinding(() => this.bindingStore.set(target, sessionId))
+    if (persist) await this.storeBinding(() => this.bindingStore.set(target, sessionId, this.workspaceHint(target, workspace)))
     return active
+  }
+
+  /** A topic's binding keeps its workspace, for when the session is gone; see {@link TelegramBinding.workspaceId}. */
+  private workspaceHint(target: TelegramTarget, workspace: Workspace): string | undefined {
+    return targetThreadId(target) === undefined ? undefined : workspace.id
   }
 
   /** Write a binding change; a failure only costs the binding after a restart. */
@@ -1938,6 +2135,7 @@ export class TelegramBridge {
 
   private async rebind(stored: readonly TelegramBinding[]): Promise<void> {
     const archived = new Set(this.ctx.workspaceRegistry.archivedSessionIds)
+    const workspaces = this.ctx.workspaceRegistry.list()
     for (const binding of stored) {
       if (this.stopped) return
       // Topic mode keeps the main chat's binding for when it is turned off again.
@@ -1945,8 +2143,14 @@ export class TelegramBridge {
       const target = chatTarget(binding.chatId, binding.threadId)
       const sessionId = binding.sessionId as SessionId
       const workspace = archived.has(sessionId) ? undefined
-        : this.ctx.workspaceRegistry.list().find(candidate => candidate.sessionIds.includes(sessionId))
+        : workspaces.find(candidate => candidate.sessionIds.includes(sessionId))
       if (workspace === undefined) {
+        // In topic mode the topic goes too; an empty registry may not be loaded, so nothing is deleted then.
+        if (this.privateTopics && binding.threadId !== undefined) {
+          if (workspaces.length === 0) continue
+          this.staleTopics.push({ target, sessionId })
+          continue
+        }
         await this.storeBinding(() => this.bindingStore.delete(target, sessionId))
         continue
       }
@@ -1960,6 +2164,145 @@ export class TelegramBridge {
     }
   }
 
+  /**
+   * Topic mode: make the topics match DSH, on start and on `/sync` (`report`,
+   * the chat that asked, always gets the outcome). Topics of archived or
+   * removed sessions are deleted (a running one is left for later), so are
+   * empty topics, whose session never had a turn (it is archived), and every
+   * other session that has had a turn in the last `days` days gets a topic named after its title,
+   * oldest first so the newest ends on top. Topics are only created when the
+   * bot has exactly one private chat (one allowed user, or the one chat its
+   * topics are in). Runs one at a time; failures only warn.
+   */
+  private syncTopics(report?: TelegramTarget, days = SYNC_DAYS): Promise<void> {
+    // Never rejects: the start-up sync must not keep the bridge from polling.
+    const run = this.topicSync.then(() => this.syncTopicsOnce(report, days)).catch((error: unknown) => {
+      if (!this.stopped) this.ctx.logger.warn('[telegram] topic sync failed: %s', messageOf(error))
+    })
+    this.topicSync = run
+    return run
+  }
+
+  private async syncTopicsOnce(report: TelegramTarget | undefined, days: number): Promise<void> {
+    // On start, messages sent while the bot was offline are still unread: an
+    // empty-looking topic may have its first message waiting, so only /sync empties.
+    const manual = report !== undefined
+    if (!this.privateTopics || this.stopped) return
+    const signal = this.abortController.signal
+    let deleted = 0
+    let emptied = 0
+    const emptiedSessions = new Set<SessionId>()
+    let created = 0
+    const deletedKeys = new Set<string>()
+    let items: Awaited<ReturnType<Context['sessionController']['list']>>['items'] | undefined
+    try {
+      items = (await this.ctx.sessionController.list({}, signal)).items
+    } catch (error) {
+      if (!this.stopped) this.ctx.logger.warn('[telegram] listing the sessions for the topic sync failed: %s', messageOf(error))
+    }
+    const blank = new Set(items?.filter(item => item.blank === true).map(item => item.sessionId))
+    // Taken before stale topics go, so a chat whose only topic is stale still counts.
+    const chats = new Set([...this.allowedUserIds, ...[...this.chatsBySession.values(), ...this.staleTopics]
+      .map(chat => targetChatId(chat.target))])
+    const archivedNow = new Set(this.ctx.workspaceRegistry.archivedSessionIds)
+    if (this.ctx.workspaceRegistry.list().length > 0) {
+      for (const chat of [...this.chatsBySession.values()]) {
+        if (!this.isTopic(chat.target) || this.ctx.agents.get(chat.sessionId)?.status === 'running') continue
+        const key = targetKey(chat.target)
+        // An empty topic (its session never had a turn) goes too, with its session archived,
+        // unless something is already on its way into it.
+        const empty = manual && blank.has(chat.sessionId) && chat.telegramInputs.size === 0
+          && !this.collections.has(key) && !this.pendingQuestions.has(key)
+        if (!empty && !archivedNow.has(chat.sessionId) && !this.sessionGone(chat.sessionId)) continue
+        if (empty && !archivedNow.has(chat.sessionId)) {
+          try {
+            await this.ctx.workspaceRegistry.archiveSession(chat.sessionId)
+          } catch (error) {
+            this.ctx.logger.warn('[telegram] archiving an empty session failed: %s', messageOf(error))
+            continue
+          }
+        }
+        if (empty) emptiedSessions.add(chat.sessionId)
+        const state = this.chats.get(targetKey(chat.target))
+        if (state !== undefined) {
+          await this.releaseActive(state)
+          this.chats.delete(targetKey(chat.target))
+        }
+        this.menus.delete(targetKey(chat.target))
+        // Released above, which forgets the binding; it is kept until the topic is gone.
+        await this.storeBinding(() => this.bindingStore.set(chat.target, chat.sessionId, chat.workspace.id))
+        this.staleTopics.push({ target: chat.target, sessionId: chat.sessionId })
+      }
+    }
+    let failed = 0
+    for (const stale of this.staleTopics.splice(0)) {
+      if (this.stopped) return
+      const { target, sessionId } = stale
+      try {
+        await this.requireClient('deleteForumTopic')(targetChatId(target), targetThreadId(target)!, signal)
+        deletedKeys.add(targetKey(target))
+        deleted += 1
+        if (emptiedSessions.has(sessionId)) emptied += 1
+      } catch (error) {
+        if (this.stopped) return
+        if (!isTopicMissing(error)) {
+          this.ctx.logger.warn('[telegram] deleting a stale topic failed: %s', messageOf(error))
+          this.staleTopics.push(stale)
+          failed += 1
+          continue
+        }
+      }
+      await this.storeBinding(() => this.bindingStore.delete(target, sessionId))
+    }
+    const chatId = chats.size === 1 ? [...chats][0]! : undefined
+    if (chatId === undefined) {
+      if (chats.size > 1) this.ctx.logger.warn('[telegram] topic sync skipped creating topics: more than one private chat')
+    } else if (items !== undefined) {
+      try {
+        const since = Date.now() - days * 24 * 60 * 60 * 1000
+        const archived = new Set(this.ctx.workspaceRegistry.archivedSessionIds)
+        const workspaces = this.ctx.workspaceRegistry.list()
+        const missing = items
+          .filter(item => item.blank !== true && !archived.has(item.sessionId) && !this.chatsBySession.has(item.sessionId)
+            && (days === Number.POSITIVE_INFINITY || item.updatedAt >= since))
+          .flatMap(item => {
+            const workspace = workspaces.find(candidate => candidate.sessionIds.includes(item.sessionId))
+            return workspace === undefined ? [] : [{ item, workspace }]
+          })
+          .sort((a, b) => a.item.updatedAt - b.item.updatedAt)
+        for (const { item, workspace } of missing) {
+          if (this.stopped) return
+          // The list was read before the earlier topics: skip what changed since.
+          if (this.ctx.workspaceRegistry.archivedSessionIds.includes(item.sessionId) || this.chatsBySession.has(item.sessionId)) continue
+          try {
+            await this.createTopicSession(chatId, workspace, undefined,
+              { sessionId: item.sessionId, title: displayTitle(item.projections?.values.title) }, true)
+            created += 1
+          } catch (error) {
+            if (this.stopped) return
+            this.ctx.logger.warn('[telegram] creating a topic for session %s failed: %s', item.sessionId, messageOf(error))
+          }
+        }
+      } catch (error) {
+        if (!this.stopped) this.ctx.logger.warn('[telegram] creating the missing topics failed: %s', messageOf(error))
+      }
+    }
+    const changed = created + deleted + failed
+    if (changed > 0) this.ctx.logger.info('[telegram] topic sync: %d created, %d deleted, %d failed', created, deleted, failed)
+    const notice = report ?? (changed > 0 ? chatId : undefined)
+    if (notice === undefined || this.stopped) return
+    // A report into a topic that was just deleted goes to its main chat.
+    const to = deletedKeys.has(targetKey(notice)) ? targetChatId(notice) : notice
+    const scope = days === Number.POSITIVE_INFINITY ? '所有会话' : `最近 ${days} 天的会话`
+    await this.safeSend(to, changed === 0 ? `🔄 **话题已是最新**\n\n${scope}都已有话题，也没有需要删除的话题。`
+      : `🔄 **话题已与 DSH 同步**（${scope}）\n\n${[
+        created > 0 ? `新建 ${created} 个话题` : '',
+        emptied > 0 ? `清理 ${emptied} 个没有对话的空话题（会话已归档）` : '',
+        failed > 0 ? `${failed} 个话题删除失败，下次同步会再试` : '',
+        deleted > emptied ? `删除 ${deleted - emptied} 个已归档或已不存在的会话的话题` : '',
+      ].filter(Boolean).join('；')}`)
+  }
+
   // --- Topic mode ------------------------------------------------------------
 
   /**
@@ -1967,29 +2310,53 @@ export class TelegramBridge {
    * that order; when a later step fails, the earlier ones are undone (the
    * session is archived: DSH cannot delete sessions). The topic opens with the
    * workspace's name, and `source`, a main-chat message, becomes its first input.
+   * With `existing`, the topic is for that session instead of a new one: it is
+   * unarchived when needed, and a failure only removes the topic. `synced`
+   * (from {@link syncTopics}) leaves the session's Agent unloaded.
    */
-  private async createTopicSession(chatId: number, workspace: Workspace, source?: TelegramMessage): Promise<ActiveChatSession> {
+  private async createTopicSession(
+    chatId: number,
+    workspace: Workspace,
+    source?: TelegramMessage,
+    existing?: { readonly sessionId: SessionId; readonly title: string | undefined },
+    synced = false,
+  ): Promise<ActiveChatSession> {
     if (await workspace.status() !== 'ok') throw new Error(`工作区目录不存在：${workspace.path}`)
     const signal = this.abortController.signal
-    const name = topicNameOf(source === undefined ? undefined : telegramText(source))
+    const name = existing === undefined ? topicNameOf(source === undefined ? undefined : telegramText(source)) : topicNameOf(existing.title)
     const topic = await this.requireClient('createForumTopic')(chatId, name, signal)
     const target: TelegramTarget = { chatId, threadId: topic.message_thread_id }
-    let sessionId: SessionId | undefined
+    let created: SessionId | undefined
     try {
-      sessionId = (await this.ctx.sessionController.create({
-        workspaceId: workspace.id,
-        ...(this.preset === undefined ? {} : { agentPreset: this.preset }),
-      })).sessionId
+      let sessionId: SessionId
+      if (existing === undefined) {
+        sessionId = created = (await this.ctx.sessionController.create({
+          workspaceId: workspace.id,
+          ...(this.preset === undefined ? {} : { agentPreset: this.preset }),
+        })).sessionId
+      } else {
+        sessionId = existing.sessionId
+        if (this.ctx.workspaceRegistry.archivedSessionIds.includes(sessionId)) {
+          // A sync never takes back an archive made while it ran.
+          if (synced) throw new Error('会话在同步期间被归档')
+          await this.ctx.workspaceRegistry.unarchiveSession(sessionId)
+        }
+        // A synced topic loads its Agent with the first message, like a restored one.
+        if (!synced) await this.resolveAgent(sessionId)
+      }
       const active = await this.bind(target, workspace, sessionId, false)
       active.topicName = name
+      active.topicBase = existing === undefined || existing.title === undefined ? undefined : name
       // Unlike a switch in single-chat mode, a topic without its stored binding is lost after a restart.
-      await this.bindingStore.set(target, sessionId)
+      await this.bindingStore.set(target, sessionId, workspace.id)
     } catch (error) {
-      await this.undoTopicSession(target, sessionId)
+      await this.undoTopicSession(target, created)
       throw error
     }
     const active = this.chats.get(targetKey(target))!.active!
-    await this.safeSend(target, `🗂 **工作区**：${richLiteral(workspace.title)}\n\n${richCodeBlock(workspace.path)}\n\n---\n\n直接发消息开始任务；/menu 可以切换模型、归档，或新建会话。`)
+    await this.safeSend(target, `🗂 **工作区**：${richLiteral(workspace.title)}\n\n${richCodeBlock(workspace.path)}\n\n---\n\n${existing === undefined
+      ? '直接发消息开始任务；/menu 可以切换模型、归档，或新建会话。'
+      : `已打开会话 ${sessionLabel(existing.sessionId, existing.title)}，直接发消息即可继续。`}`)
     if (source !== undefined) {
       this.sourceTopics.set(`${chatId}:${source.message_id}`, target)
       if (this.sourceTopics.size > MAX_KEYBOARD_PANELS) this.sourceTopics.delete(this.sourceTopics.keys().next().value!)
@@ -1998,14 +2365,42 @@ export class TelegramBridge {
     return active
   }
 
+  /**
+   * Show an existing session in its own topic: the topic it already has, or a
+   * new one. A topic rebuilt after its old one was lost receives the old
+   * topic's cached result. One session is bound to at most one topic.
+   * @returns the session's binding, and whether its topic already existed.
+   */
+  private async openTopicSession(chatId: number, workspace: Workspace, sessionId: SessionId): Promise<{ active: ActiveChatSession; existed: boolean }> {
+    const owner = this.chatsBySession.get(sessionId)
+    if (owner !== undefined) {
+      if (targetChatId(owner.target) !== chatId) throw new Error('该会话正在被另一个 Telegram 私聊使用')
+      if (targetThreadId(owner.target) !== undefined) return { active: owner, existed: true }
+    }
+    const { title } = await this.sessionStatus(sessionId)
+    const active = await this.createTopicSession(chatId, workspace, undefined, { sessionId, title })
+    const lost = this.lostTopicOf.get(sessionId)
+    if (lost !== undefined) {
+      this.lostTopicOf.delete(sessionId)
+      try {
+        await this.resultCache.resend(lost, text => this.resultCache.deliver(active.target, text, markdown =>
+          this.client.sendRichMessage(active.target, markdown, this.abortController.signal)))
+      } catch (error) {
+        this.ctx.logger.warn('[telegram] moving the cached result to the rebuilt topic failed: %s', messageOf(error))
+      }
+    }
+    return { active, existed: false }
+  }
+
   /** Roll back a topic whose session could not be created or bound; each step is best-effort. */
   private async undoTopicSession(target: TelegramTarget, sessionId: SessionId | undefined): Promise<void> {
     const state = this.chats.get(targetKey(target))
+    const bound = state?.active?.sessionId
     if (state !== undefined) {
       await this.releaseActive(state).catch(() => {})
       this.chats.delete(targetKey(target))
     }
-    await this.bindingStore.delete(target, sessionId).catch(() => {})
+    await this.bindingStore.delete(target, bound).catch(() => {})
     const undo = async (label: string, task: () => Promise<unknown>): Promise<void> => {
       try { await task() } catch (error) {
         this.ctx.logger.warn('[telegram] undoing the new topic: %s failed: %s', label, messageOf(error))
@@ -2015,31 +2410,120 @@ export class TelegramBridge {
     await undo('deleting the topic', () => this.requireClient('deleteForumTopic')(targetChatId(target), targetThreadId(target)!))
   }
 
-  /** Tell `target` where the new topic is, with a button that opens it when the bot's username is known. */
-  private async sendTopicLink(target: TelegramTarget, active: ActiveChatSession): Promise<void> {
+  /** Tell `target` where the topic is, with a button that opens it when the bot's username is known. */
+  private async sendTopicLink(target: TelegramTarget, active: ActiveChatSession, heading = '✅ **已新建会话**'): Promise<void> {
     const threadId = targetThreadId(active.target)
     const link = this.botUsername === undefined || threadId === undefined ? undefined
-      : `https://t.me/${this.botUsername}/${threadId}`
+      // The topic's first message has the thread's id; linking to it opens the
+      // topic itself, while `/<thread>` alone only scrolls the combined view.
+      : `https://t.me/${this.botUsername}/${threadId}/${threadId}`
     await this.safeSend(target, [
-      '✅ **已新建会话**',
+      heading,
       `**工作区**：${richLiteral(active.workspace.title)}`,
-      link === undefined ? '在侧栏中打开新话题即可继续。'
+      link === undefined ? '在侧栏中打开该话题即可继续。'
         : `<tg-button-row><tg-button type="url" url="${escapeHtml(link)}" style="primary">打开话题</tg-button></tg-button-row>`,
     ].join('\n\n'))
   }
 
-  /** In topic mode, name the session's topic after its title once DSH has one. */
-  private async renameTopic(chat: ActiveChatSession, title: unknown): Promise<void> {
+  /**
+   * In topic mode, name the session's topic after its title once DSH has one
+   * (`title`), with the archive mark while the session is archived.
+   */
+  private async renameTopic(chat: ActiveChatSession, title?: unknown): Promise<void> {
     const threadId = targetThreadId(chat.target)
-    const name = displayTitle(title)
-    if (!this.privateTopics || threadId === undefined || name === undefined) return
-    const next = truncateText(name, MAX_TOPIC_NAME_LENGTH)
+    if (!this.privateTopics || threadId === undefined) return
+    const named = displayTitle(title)
+    if (named !== undefined) chat.topicBase = named
+    // After a restart the name is unknown until DSH titles the session again.
+    chat.topicBase ??= (await this.sessionStatus(chat.sessionId).catch(() => undefined))?.title
+    const base = chat.topicBase ?? chat.topicName?.replace(ARCHIVED_TOPIC_MARK, '') ?? DEFAULT_TOPIC_NAME
+    const archived = this.ctx.workspaceRegistry.archivedSessionIds.includes(chat.sessionId)
+    const next = truncateText(`${archived ? ARCHIVED_TOPIC_MARK : ''}${base}`, MAX_TOPIC_NAME_LENGTH)
     if (next === chat.topicName) return
     try {
       await this.requireClient('editForumTopic')(targetChatId(chat.target), threadId, next, this.abortController.signal)
       chat.topicName = next
     } catch (error) {
       if (!this.stopped && !isNotModified(error)) this.ctx.logger.warn('[telegram] renaming the topic failed: %s', messageOf(error))
+    }
+  }
+
+  /** Whether `target` is a topic of topic mode, where archiving deletes the topic. */
+  private isTopic(target: TelegramTarget): boolean {
+    return this.privateTopics && targetThreadId(target) !== undefined
+  }
+
+  /**
+   * Delete the topic with its messages, then archive its session (DSH cannot
+   * delete sessions) and forget the binding. The main chat is told where the
+   * session went.
+   */
+  private async deleteTopic(target: TelegramTarget): Promise<void> {
+    const state = this.chats.get(targetKey(target))
+    const active = state?.active
+    if (active !== undefined && this.ctx.agents.get(active.sessionId)?.status === 'running') {
+      throw new Error('任务还在运行，请等它完成，或先点生成预览上的停止按钮')
+    }
+    await this.requireClient('deleteForumTopic')(targetChatId(target), targetThreadId(target)!, this.abortController.signal)
+    this.menus.delete(targetKey(target))
+    let archiveError: unknown
+    if (state !== undefined) {
+      // The topic is gone already: its state goes even when archiving fails.
+      try {
+        if (active !== undefined && !this.ctx.workspaceRegistry.archivedSessionIds.includes(active.sessionId)) {
+          await this.ctx.workspaceRegistry.archiveSession(active.sessionId)
+        }
+      } catch (error) {
+        archiveError = error
+        this.ctx.logger.warn('[telegram] archiving the deleted topic\'s session failed: %s', messageOf(error))
+      }
+      await this.releaseActive(state)
+      this.chats.delete(targetKey(target))
+    }
+    await this.safeSend(targetChatId(target), active === undefined ? '🗑 **已删除话题**'
+      : archiveError !== undefined
+        ? `🗑 **已删除话题**\n\n但会话 ${sessionLabel(active.sessionId, active.topicBase)} 归档失败：${richLiteral(messageOf(archiveError))}。可以在 DSH 里手动归档它。`
+        : `🗑 **已删除话题**\n\n会话 ${sessionLabel(active.sessionId, active.topicBase)} 已归档保留；可以在 /menu 的「打开已有会话」中重新打开。`)
+  }
+
+  /**
+   * Telegram refused a send because the topic is gone (deleted elsewhere): drop
+   * its binding, and offer the main chat a new topic for the session. Runs off
+   * the chat's delivery queue, which may be the caller.
+   */
+  private noteSendFailure(target: TelegramTarget, error: unknown): void {
+    if (!this.isTopic(target) || !isTopicMissing(error) || this.lostTopics.has(targetKey(target))) return
+    this.lostTopics.add(targetKey(target))
+    const task = (async () => {
+      const state = this.chats.get(targetKey(target))
+      const active = state?.active
+      if (state !== undefined) {
+        await this.releaseActive(state)
+        this.chats.delete(targetKey(target))
+      }
+      this.menus.delete(targetKey(target))
+      if (active === undefined) return
+      this.lostTopicOf.set(active.sessionId, target)
+      this.ctx.logger.warn('[telegram] the topic of session %s is gone; its binding is dropped', active.sessionId)
+      await this.safeSend(targetChatId(target), `⚠️ **话题已不存在**\n\n会话 ${sessionLabel(active.sessionId, active.topicBase)} 的消息无法送达，会话本身不受影响。`)
+      await this.showMenu(targetChatId(target), 'recover', 0, active.sessionId)
+    })().catch((failure: unknown) => {
+      if (!this.stopped) this.ctx.logger.warn('[telegram] handling the lost topic failed: %s', messageOf(failure))
+    }).finally(() => { this.backgroundTasks.delete(task) })
+    this.backgroundTasks.add(task)
+  }
+
+  /**
+   * Draft pacing for one private chat. Its topics share Telegram's limits, so
+   * each running turn's drafts are spaced by the number of turns streaming in
+   * the chat, and a 429 holds all of them.
+   */
+  private draftPacing(chatId: number): DraftPacing {
+    return {
+      interval: () => DRAFT_INTERVAL_MS * Math.max(1, [...this.chatsBySession.values()]
+        .filter(chat => targetChatId(chat.target) === chatId && chat.progress?.live === true).length),
+      holdUntil: () => this.floodHolds.get(chatId) ?? 0,
+      flood: (until) => { this.floodHolds.set(chatId, Math.max(until, this.floodHolds.get(chatId) ?? 0)) },
     }
   }
 
@@ -2191,7 +2675,7 @@ export class TelegramBridge {
   /** Explicit `/followup`: queue one message, or submit the active collection as a later turn. */
   private async handleFollowupMessage(active: ActiveChatSession, message: TelegramMessage, argsText: string): Promise<void> {
     const hasContent = argsText !== '' || message.document !== undefined || message.photo !== undefined
-      || message.reply_to_message !== undefined
+      || explicitReply(message) !== undefined
     const collection = this.collectionFor(active)
     if (collection !== undefined) {
       if (hasContent && !await this.addToCollection(active, collection, message, argsText, false)) return
@@ -2278,7 +2762,7 @@ export class TelegramBridge {
     overrideText?: string,
   ): Promise<CollectedPart[]> {
     const parts: CollectedPart[] = []
-    const reply = message.reply_to_message
+    const reply = explicitReply(message)
     if (reply !== undefined) {
       parts.push({ type: 'text', text: quotedTextBlock(reply, this.imageCandidate(reply) !== undefined, message.quote) })
       parts.push(...await this.mediaParts(active, reply, '[Telegram 引用图片已保存到工作区：'))
@@ -2388,7 +2872,8 @@ export class TelegramBridge {
   /** Admit collected images, preserve part order, then steer a running turn or queue a follow-up. */
   private async submitParts(active: ActiveChatSession, parts: readonly CollectedPart[], mode: DeliveryMode): Promise<void> {
     if (this.ctx.workspaceRegistry.archivedSessionIds.includes(active.sessionId)) {
-      throw new Error('当前会话已归档，请在 /menu 会话列表中重新打开它，或使用 /new 新建会话')
+      throw new Error(this.isTopic(active.target) ? '这个会话已在 DSH 中归档；下次 Bot 启动时这个话题会被删除。可以在主会话的「打开已有会话」里重新打开它'
+        : '当前会话已归档，请在 /menu 会话列表中重新打开它，或使用 /new 新建会话')
     }
     const agent = await this.resolveAgent(active.sessionId)
     this.ensureWidgetTool(agent)
@@ -2414,6 +2899,9 @@ export class TelegramBridge {
     })
     if (content.length === 0) throw new Error('消息没有可提交的内容')
     const input = createUserMessage({ content, source: { kind: 'user' } })
+    active.telegramInputs.add(input.id)
+    // Inputs another client cancelled are never claimed; keep only the recent ones.
+    if (active.telegramInputs.size > 64) active.telegramInputs.delete(active.telegramInputs.values().next().value!)
     if (mode === 'followup' || agent.status !== 'running') agent.followup(input)
     else agent.steer(input)
   }
@@ -2847,6 +3335,12 @@ export class TelegramBridge {
       void this.enqueue(chat, () => this.renameTopic(chat, (event.data as { title?: unknown } | undefined)?.title))
       return
     }
+    if (event.type === 'user/message') {
+      // The turn's first prompt tells who started it; injected context does not.
+      const message = event.data as { id?: unknown; source?: { kind?: unknown } }
+      const ours = typeof message.id === 'string' && chat.telegramInputs.delete(message.id)
+      if (chat.turnOrigin === undefined && (ours || message.source?.kind === 'user')) chat.turnOrigin = ours ? 'telegram' : 'other'
+    }
     const presented = presentedFiles(event)
     if (presented !== undefined) {
       // Relative paths use the Session working directory, exactly as `present` resolved them.
@@ -2860,19 +3354,25 @@ export class TelegramBridge {
       chat.presentedFiles.clear()
       chat.progress?.dispose()
       chat.turnStartedAt = Math.floor(Date.now() / 1000)
+      chat.turnOrigin = undefined
       // Before the first draft: an open menu starts its clock.
       void this.refreshMenu(chat.target)
       void this.safeAction(chat.target, 'typing')
       this.startTyping(chat)
       chat.progress = new TelegramProgress(this.client, chat.target, this.abortController.signal,
         task => this.enqueue(chat, task),
-        error => this.ctx.logger.warn('[telegram] preview failed: %s', messageOf(error)),
-        messageId => chat.transientMessageIds.add(messageId))
+        (error) => {
+          this.noteSendFailure(chat.target, error)
+          this.ctx.logger.warn('[telegram] preview failed: %s', messageOf(error))
+        },
+        messageId => chat.transientMessageIds.add(messageId),
+        this.draftPacing(targetChatId(chat.target)))
     } else if (event.type === 'turn/end') {
       const cwd = session.header.cwd ?? chat.workspace.path
       const progress = chat.progress
       chat.progress = undefined
       chat.turnStartedAt = undefined
+      chat.turnOrigin = undefined
       const reason = event.data.reason.kind
       const notice = progress?.terminalNotice(reason)
       // An aborted turn never delivers its partial answer.
@@ -2942,6 +3442,11 @@ export class TelegramBridge {
     } catch (error) {
       if (this.stopped) return 'failed'
       this.ctx.logger.error('[telegram] result delivery failed: %s', messageOf(error))
+      if (this.isTopic(chat.target) && isTopicMissing(error)) {
+        // The main chat is told instead; the rebuilt topic receives the cached result.
+        this.noteSendFailure(chat.target, error)
+        return 'failed'
+      }
       await this.safeSend(chat.target, '⚠️ **结果发送失败**\n\n完整结果已缓存，可发送 /resend 重试；详细原因见 DSH 日志。')
       return 'failed'
     }
@@ -3007,6 +3512,7 @@ export class TelegramBridge {
       } catch (error) {
         if (this.stopped) return
         this.ctx.logger.error('[telegram] file delivery failed: %s: %s', file.path, messageOf(error))
+        this.noteSendFailure(chat.target, error)
         failures.push(`- ${richLiteral(file.path)}：发送失败，详细原因见 DSH 日志`)
       }
     }
@@ -3054,6 +3560,7 @@ export class TelegramBridge {
       return (await this.client.sendRichMessage(target, text, this.abortController.signal)).message_id
     } catch (error) {
       if (!this.stopped) this.ctx.logger.error('[telegram] delivery failed: %s', messageOf(error))
+      this.noteSendFailure(target, error)
       return undefined
     }
   }

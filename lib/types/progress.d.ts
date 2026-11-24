@@ -2,6 +2,24 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { TelegramClientLike, TelegramTarget } from './client.js';
 /**
+ * Shortest time from the start of one draft update to the start of the next.
+ * The update in flight already spaces them by a Bot API round trip (about half
+ * a second through a distant proxy); a 429 answer backs off further.
+ */
+export declare const DRAFT_INTERVAL_MS = 600;
+/**
+ * Draft pacing shared by every turn streaming into one private chat: topics
+ * of a chat share Telegram's flood limits, so a 429 holds all of them.
+ */
+export interface DraftPacing {
+    /** Shortest time between the starts of two draft updates of this turn. */
+    interval(): number;
+    /** Time (ms since epoch) before which no draft of the chat may be sent. */
+    holdUntil(): number;
+    /** Telegram answered 429: hold every draft of the chat until `until`. */
+    flood(until: number): void;
+}
+/**
  * One turn's Telegram output while it runs. Intermediate assistant messages are
  * sent as temporary real messages, removed once the final message (folded
  * process record plus answer) is delivered; a disposable draft previews only
@@ -18,7 +36,10 @@ export declare class TelegramProgress {
     private readonly warn;
     /** Record a temporary message for removal after final delivery. */
     private readonly track;
+    private readonly pacing;
     private draftId;
+    /** Every draft id this turn used, so native Stop on any of its previews finds it. */
+    private readonly draftIds;
     private readonly started;
     private readonly abort;
     private readonly signal;
@@ -47,7 +68,7 @@ export declare class TelegramProgress {
     /** Aborted when the bridge stops; real messages outlive the turn's draft. */
     stopSignal: AbortSignal, enqueue: (task: () => Promise<void>) => Promise<void>, warn: (error: unknown) => void, 
     /** Record a temporary message for removal after final delivery. */
-    track: (messageId: number) => void);
+    track: (messageId: number) => void, pacing?: DraftPacing);
     /** Reject old attempts and revisions, including late chunks after a retry. */
     stream(frame: AssistantStreamFrame): void;
     event(event: SessionEvent): void;
@@ -60,6 +81,10 @@ export declare class TelegramProgress {
      */
     private publish;
     private newDraft;
+    /** Whether `draftId` is one of this turn's previews. */
+    hasDraft(draftId: number): boolean;
+    /** Whether the turn still streams previews. */
+    get live(): boolean;
     private changed;
     /** Invalidate queued previews before a persisted assistant message or user question. */
     pause(): void;
@@ -80,6 +105,8 @@ export declare class TelegramProgress {
     finalMessage(notice?: string): string | undefined;
     private status;
     private schedule;
+    /** When the next draft may go out: this turn's own spacing, or the chat's flood hold. */
+    private sendAt;
     private preview;
     private send;
 }

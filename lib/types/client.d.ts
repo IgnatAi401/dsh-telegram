@@ -65,7 +65,16 @@ export interface TelegramMessage {
     readonly photo?: readonly TelegramPhotoSize[];
     readonly document?: TelegramDocument;
     readonly media_group_id?: string;
+    /**
+     * In a topic, every message replies to the topic's first (service) message
+     * unless the user replied to another one.
+     */
     readonly reply_to_message?: TelegramMessage;
+    /** Service messages of topics: created by the bot, renamed, closed or reopened. */
+    readonly forum_topic_created?: unknown;
+    readonly forum_topic_edited?: unknown;
+    readonly forum_topic_closed?: unknown;
+    readonly forum_topic_reopened?: unknown;
     /** Quoted part of `reply_to_message`, when the reply quotes only a part of it. */
     readonly quote?: TelegramTextQuote;
     readonly date: number;

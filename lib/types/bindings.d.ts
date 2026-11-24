@@ -1,7 +1,9 @@
 /**
  * Which DSH session each Telegram chat (or chat topic) is bound to, kept in
  * DSH_HOME so a restart resumes the conversation. Only the session id is
- * stored: its workspace is read from the Workspace registry on restore.
+ * stored for a live session: its workspace is read from the Workspace registry
+ * on restore. The workspace id is kept only as a hint for when the session is
+ * gone, so a topic can offer a new session in the same workspace.
  * @module telegram/bindings
  */
 import type { TelegramBotSettings, TelegramTarget } from './client.js';
@@ -11,6 +13,8 @@ export interface TelegramBinding {
     /** Absent for the main chat (no topic). */
     readonly threadId?: number;
     readonly sessionId: string;
+    /** The session's workspace when it was bound; used only once the session is gone. */
+    readonly workspaceId?: string;
 }
 /** The boolean topic settings of `value`, ignoring everything else. */
 export declare function topicSettingsOf(value: unknown): TelegramBotSettings;
@@ -29,8 +33,8 @@ export declare class TelegramBindingStore {
     constructor(token: string, path?: string);
     /** Read the stored bindings; a missing file means none. Invalid entries are skipped. */
     load(): Promise<TelegramBinding[]>;
-    /** Bind `target` to `sessionId`; resolves once the file is written. */
-    set(target: TelegramTarget, sessionId: string): Promise<void>;
+    /** Bind `target` to `sessionId` of `workspaceId`; resolves once the file is written. */
+    set(target: TelegramTarget, sessionId: string, workspaceId?: string): Promise<void>;
     /** Forget `target`'s binding, if it is still bound to `sessionId` (or any session when omitted). */
     delete(target: TelegramTarget, sessionId?: string): Promise<void>;
     /** The bot's topic settings from before topic mode, while it is on; see {@link BindingFile.topicSettings}. */

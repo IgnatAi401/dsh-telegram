@@ -89,8 +89,22 @@ export declare class TelegramBridge {
     private readonly menuUpdates;
     /** The panel tap each chat is handling; taps are handled one at a time by the polling loop. */
     private readonly taps;
-    /** Chats whose `/compact` is still summarizing; native Stop aborts it. */
+    /** Chats whose `/compact` is still summarizing, with its draft; native Stop aborts it. */
     private readonly compacting;
+    /** Topics Telegram reported gone, by {@link targetKey}; each is reported once. */
+    private readonly lostTopics;
+    /**
+     * Topics whose session is archived or gone, waiting for {@link syncTopics} to
+     * delete them. Their binding stays stored until Telegram confirms, so a
+     * failed deletion is retried by the next sync, or after a restart.
+     */
+    private readonly staleTopics;
+    /** The running topic sync; see {@link syncTopics}. */
+    private topicSync;
+    /** The topic each session lost, so its rebuilt topic can receive the cached result. */
+    private readonly lostTopicOf;
+    /** Per private chat: no draft before this time (ms), after Telegram answered 429. */
+    private readonly floodHolds;
     /** Work started off the polling loop; `stop` waits for it. */
     private readonly backgroundTasks;
     private readonly abortController;
@@ -130,6 +144,8 @@ export declare class TelegramBridge {
      * may carry a `message_thread_id` too.
      */
     private messageTarget;
+    /** Whether DSH no longer lists the session in any workspace (it was removed). */
+    private sessionGone;
     /** In topic mode, the main chat: it binds no session and only starts topics. */
     private isLobby;
     private authorizedUser;
@@ -143,6 +159,11 @@ export declare class TelegramBridge {
     /** Route chat input to a waiting question; returns false when the message is an ordinary command. */
     private handleQuestionInput;
     private handleCommand;
+    /**
+     * The chat or topic a native Stop belongs to: the one whose turn (or
+     * compaction) streamed that draft, else the topic the update names.
+     */
+    private stopTarget;
     /** Native Stop: cancel the running turn and any question it is waiting on. */
     private stopCurrentTask;
     /** Report the figures the Web composer shows for the current session. */
@@ -209,6 +230,8 @@ export declare class TelegramBridge {
     private stateFor;
     /** The chat bound to an Agent's session, if any. */
     private boundChat;
+    /** The bound chat, unless the running turn was started elsewhere: its questions belong there. */
+    private telegramTurn;
     /** Resolve the live Agent through the Session Controller, resuming a cold session. */
     private resolveAgent;
     /** Create a session in `workspace` exactly as Web does and bind this chat to it. */
@@ -216,6 +239,8 @@ export declare class TelegramBridge {
     /** Bind this chat to an existing session, unarchiving it first when needed. */
     private openSession;
     private bind;
+    /** A topic's binding keeps its workspace, for when the session is gone; see {@link TelegramBinding.workspaceId}. */
+    private workspaceHint;
     /** Write a binding change; a failure only costs the binding after a restart. */
     private storeBinding;
     /**
@@ -225,18 +250,63 @@ export declare class TelegramBridge {
     private restoreBindings;
     private rebind;
     /**
+     * Topic mode: make the topics match DSH, on start and on `/sync` (`report`,
+     * the chat that asked, always gets the outcome). Topics of archived or
+     * removed sessions are deleted (a running one is left for later), so are
+     * empty topics, whose session never had a turn (it is archived), and every
+     * other session that has had a turn in the last `days` days gets a topic named after its title,
+     * oldest first so the newest ends on top. Topics are only created when the
+     * bot has exactly one private chat (one allowed user, or the one chat its
+     * topics are in). Runs one at a time; failures only warn.
+     */
+    private syncTopics;
+    private syncTopicsOnce;
+    /**
      * Create a topic, a session in `workspace`, and the binding between them, in
      * that order; when a later step fails, the earlier ones are undone (the
      * session is archived: DSH cannot delete sessions). The topic opens with the
      * workspace's name, and `source`, a main-chat message, becomes its first input.
+     * With `existing`, the topic is for that session instead of a new one: it is
+     * unarchived when needed, and a failure only removes the topic. `synced`
+     * (from {@link syncTopics}) leaves the session's Agent unloaded.
      */
     private createTopicSession;
+    /**
+     * Show an existing session in its own topic: the topic it already has, or a
+     * new one. A topic rebuilt after its old one was lost receives the old
+     * topic's cached result. One session is bound to at most one topic.
+     * @returns the session's binding, and whether its topic already existed.
+     */
+    private openTopicSession;
     /** Roll back a topic whose session could not be created or bound; each step is best-effort. */
     private undoTopicSession;
-    /** Tell `target` where the new topic is, with a button that opens it when the bot's username is known. */
+    /** Tell `target` where the topic is, with a button that opens it when the bot's username is known. */
     private sendTopicLink;
-    /** In topic mode, name the session's topic after its title once DSH has one. */
+    /**
+     * In topic mode, name the session's topic after its title once DSH has one
+     * (`title`), with the archive mark while the session is archived.
+     */
     private renameTopic;
+    /** Whether `target` is a topic of topic mode, where archiving deletes the topic. */
+    private isTopic;
+    /**
+     * Delete the topic with its messages, then archive its session (DSH cannot
+     * delete sessions) and forget the binding. The main chat is told where the
+     * session went.
+     */
+    private deleteTopic;
+    /**
+     * Telegram refused a send because the topic is gone (deleted elsewhere): drop
+     * its binding, and offer the main chat a new topic for the session. Runs off
+     * the chat's delivery queue, which may be the caller.
+     */
+    private noteSendFailure;
+    /**
+     * Draft pacing for one private chat. Its topics share Telegram's limits, so
+     * each running turn's drafts are spaced by the number of turns streaming in
+     * the chat, and a 429 holds all of them.
+     */
+    private draftPacing;
     /**
      * Register `telegram_widget` in the Agent's own scope, so only sessions bound
      * to a Telegram chat see it. A failure leaves the channel without the tool.
